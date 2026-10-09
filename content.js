@@ -1,147 +1,212 @@
 // ============================================
-// FLIPKART SORT BY REVIEWS - CONTENT SCRIPT
+// FLIPKART SORT BY REVIEWS - ADVANCED VERSION
 // ============================================
 
 (function () {
   "use strict";
 
-  // State
   let isSorted = false;
   let originalOrder = [];
   let sortButton = null;
   let observer = null;
+  let isLoadingAll = false;
 
-  // ─── Utility: Extract number from text ───
+  // ─── Better number extraction ───
   function extractNumber(text) {
     if (!text) return 0;
-    // "1,234 Ratings" -> 1234
-    // "500 Reviews" -> 500
+    
+    // Remove commas and extract only digits
     const cleaned = text.replace(/,/g, "").replace(/[^\d]/g, "");
-    return parseInt(cleaned, 10) || 0;
+    const num = parseInt(cleaned, 10);
+    
+    // Filter out unreasonable numbers (like 416000000)
+    // Flipkart products rarely have more than 10M reviews
+    if (num > 10000000) return 0; // More than 1 crore is fake
+    
+    return num || 0;
   }
 
-  // ─── Find review/rating count from a product card ───
+  // ─── Smart review count detection ───
   function getReviewCount(card) {
-    // Strategy 1: Look for text containing "Rating" or "Review"
-    const allElements = card.querySelectorAll("span, div, p");
-    let maxCount = 0;
-
-    for (const el of allElements) {
-      const text = el.textContent.trim();
-
-      // Match patterns like "1,234 Ratings", "500 Reviews", "(1234)"
-      if (
-        text.match(/[\d,]+\s*(Ratings?|Reviews?)/i) ||
-        text.match(/\([\d,]+\)/)
-      ) {
-        const num = extractNumber(text);
-        if (num > maxCount) maxCount = num;
+    let reviewCount = 0;
+    
+    // Method 1: Look for exact patterns like "1,234 Ratings" or "500 Reviews"
+    const allText = card.querySelectorAll("div, span, p");
+    
+    for (const element of allText) {
+      const text = element.textContent.trim();
+      
+      // Pattern 1: "1,234 Ratings" or "1234 Ratings"
+      const ratingsMatch = text.match(/([\d,]+)\s*(Ratings?|Reviews?)/i);
+      if (ratingsMatch) {
+        const num = extractNumber(ratingsMatch[1]);
+        if (num > reviewCount && num < 10000000) {
+          reviewCount = num;
+        }
+      }
+      
+      // Pattern 2: Look for rating summary like "4.2 ★ 1,234"
+      // The number after star rating is usually review count
+      const ratingSummary = text.match(/[\d.]+\s*★\s*([\d,]+)/);
+      if (ratingSummary) {
+        const num = extractNumber(ratingSummary[1]);
+        if (num > reviewCount && num < 10000000) {
+          reviewCount = num;
+        }
       }
     }
-
-    // Strategy 2: Look for the rating summary section
-    // Flipkart often shows "4.2 ★ 1,234 Ratings 234 Reviews"
-    const ratingContainer = card.querySelector('[class*="rating"]');
-    if (ratingContainer) {
-      const spans = ratingContainer.querySelectorAll("span");
+    
+    // Method 2: Look in specific rating container
+    const ratingDivs = card.querySelectorAll('[class*="rating"], [class*="Rating"]');
+    for (const div of ratingDivs) {
+      const spans = div.querySelectorAll("span");
       for (const span of spans) {
         const text = span.textContent.trim();
         const num = extractNumber(text);
-        if (num > maxCount) maxCount = num;
-      }
-    }
-
-    // Strategy 3: Broader search for any number near "rating" text
-    if (maxCount === 0) {
-      const allSpans = card.querySelectorAll("span");
-      for (let i = 0; i < allSpans.length; i++) {
-        const text = allSpans[i].textContent.trim().toLowerCase();
-        if (text.includes("rating") || text.includes("review")) {
-          // Check previous sibling or nearby elements for numbers
-          for (let j = Math.max(0, i - 2); j <= Math.min(allSpans.length - 1, i + 2); j++) {
-            const nearbyText = allSpans[j].textContent.trim();
-            const num = extractNumber(nearbyText);
-            if (num > 0 && num > maxCount) {
-              maxCount = num;
-            }
-          }
+        if (num > 0 && num < 10000000 && num > reviewCount) {
+          reviewCount = num;
         }
       }
     }
-
-    return maxCount;
+    
+    return reviewCount;
   }
 
-  // ─── Get the product container (parent of all product cards) ───
+  // ─── Get product container ───
   function getProductContainer() {
-    // Flipkart search results are usually in a div with specific structure
-    // Try multiple selectors for resilience
+    // Try common Flipkart product grid selectors
     const selectors = [
-      'div[data-id]',                    // Products often have data-id
-      '.DOjaWF.GYdEmp',                 // Common grid container
-      'div._1AtVbE',                    // Another common container
+      'div[data-id]',
+      'div._1AtVbE',
+      'div.DOjaWF',
+      'div._75nhsW',
+      '[class*="product"]'
     ];
-
-    // Strategy: Find the container that holds multiple product-like cards
-    const allDivs = document.querySelectorAll("div");
-
-    for (const div of allDivs) {
-      const directChildren = div.children;
-      if (directChildren.length >= 3) {
-        // Check if children look like product cards
-        let productLikeChildren = 0;
-        for (const child of directChildren) {
-          const text = child.textContent || "";
-          if (
-            text.includes("★") ||
-            text.includes("Rating") ||
-            text.includes("₹")
-          ) {
-            productLikeChildren++;
+    
+    for (const selector of selectors) {
+      const containers = document.querySelectorAll(selector);
+      for (const container of containers) {
+        const children = container.children;
+        if (children.length >= 3) {
+          // Check if children are product-like
+          let productCount = 0;
+          for (const child of children) {
+            const text = child.textContent || "";
+            if (text.includes("₹") || text.includes("★") || text.includes("Rating")) {
+              productCount++;
+            }
+          }
+          if (productCount >= 3) {
+            return container;
           }
         }
-        if (productLikeChildren >= 3) {
+      }
+    }
+    
+    // Fallback: Find any div with multiple product cards
+    const allDivs = document.querySelectorAll("div");
+    for (const div of allDivs) {
+      const children = div.children;
+      if (children.length >= 10) {
+        let productCount = 0;
+        for (const child of children) {
+          const text = child.textContent || "";
+          if (text.includes("₹") && text.includes("★")) {
+            productCount++;
+          }
+        }
+        if (productCount >= 10) {
           return div;
         }
       }
     }
-
+    
     return null;
   }
 
-  // ─── Collect all product cards ───
+  // ─── Get all product cards ───
   function getProductCards() {
     const container = getProductContainer();
-    if (!container) {
-      console.warn("[FlipSort] Could not find product container");
-      return [];
-    }
-
+    if (!container) return [];
+    
     return Array.from(container.children).filter((child) => {
       const text = child.textContent || "";
       return (
         text.includes("★") ||
-        text.includes("₹") ||
-        text.includes("Rating")
+        (text.includes("₹") && text.length > 100)
       );
     });
   }
 
-  // ─── Sort products by review count ───
-  function sortByReviews() {
+  // ─── Load more products by scrolling ───
+  async function loadAllProducts() {
+    if (isLoadingAll) return;
+    isLoadingAll = true;
+    
+    showNotification("⏳ Loading all products... This may take time");
+    
+    let previousCount = 0;
+    let stableCount = 0;
+    
+    // Scroll to bottom multiple times to load more products
+    for (let i = 0; i < 50; i++) { // Max 50 scroll attempts
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(1500); // Wait for products to load
+      
+      const currentCount = getProductCards().length;
+      
+      if (currentCount === previousCount) {
+        stableCount++;
+        if (stableCount >= 3) {
+          // No new products loaded 3 times, we're done
+          break;
+        }
+      } else {
+        stableCount = 0;
+      }
+      
+      previousCount = currentCount;
+      showNotification(`⏳ Loading... ${currentCount} products loaded`);
+    }
+    
+    isLoadingAll = false;
+    showNotification(`✅ Loaded ${previousCount} products total`);
+    return previousCount;
+  }
+
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  // ─── Sort products ───
+  async function sortByReviews() {
     const container = getProductContainer();
     if (!container) {
-      alert("❌ Could not find products on this page. Try scrolling down first.");
+      alert("❌ Could not find products. Please scroll down to load products first.");
       return;
     }
 
-    const cards = getProductCards();
+    let cards = getProductCards();
     if (cards.length === 0) {
-      alert("❌ No product cards found!");
+      alert("❌ No products found!");
       return;
     }
 
-    // Save original order if not already saved
+    // Ask user if they want to load all products
+    if (cards.length < 50) {
+      const loadAll = confirm(
+        `Found only ${cards.length} products on this page.\n\n` +
+        `Click OK to load ALL products (may take time)\n` +
+        `Click Cancel to sort only current page`
+      );
+      
+      if (loadAll) {
+        await loadAllProducts();
+        cards = getProductCards(); // Refresh cards list
+      }
+    }
+
+    // Save original order
     if (originalOrder.length === 0) {
       originalOrder = [...cards];
     }
@@ -156,49 +221,59 @@
       return;
     }
 
-    // Build array of { card, reviewCount }
-    const cardData = cards.map((card) => ({
+    // Build data array with review counts
+    const cardData = cards.map((card, index) => ({
       card: card,
       reviewCount: getReviewCount(card),
+      originalIndex: index
     }));
 
-    // Sort descending by review count
-    cardData.sort((a, b) => b.reviewCount - a.reviewCount);
+    // Sort by review count (descending), then by original order if equal
+    cardData.sort((a, b) => {
+      if (b.reviewCount !== a.reviewCount) {
+        return b.reviewCount - a.reviewCount;
+      }
+      return a.originalIndex - b.originalIndex;
+    });
 
-    // Remove all cards from container
+    // Remove all cards
     cardData.forEach(({ card }) => container.removeChild(card));
 
-    // Re-append in sorted order
+    // Re-append in sorted order with badges
     cardData.forEach(({ card, reviewCount }) => {
-      // Add a badge showing the review count
       addReviewBadge(card, reviewCount);
       container.appendChild(card);
     });
 
     isSorted = true;
     updateButtonState(true);
-    showNotification(
-      `✅ Sorted ${cardData.length} products by reviews! (Most reviewed first)`
-    );
+    showNotification(`✅ Sorted ${cardData.length} products by reviews!`);
+    
+    // Scroll to top to see results
+    window.scrollTo(0, 0);
   }
 
-  // ─── Add review count badge to card ───
+  // ─── Add review badge ───
   function addReviewBadge(card, count) {
-    // Remove existing badge if any
     const existing = card.querySelector(".flipsort-badge");
     if (existing) existing.remove();
 
     const badge = document.createElement("div");
     badge.className = "flipsort-badge";
-    badge.textContent = `📝 ${count.toLocaleString()} Reviews`;
-    badge.title = "Review count detected by FlipSort";
-
-    // Position it at top-right of the card
+    
+    if (count > 0) {
+      badge.textContent = `📝 ${count.toLocaleString()}`;
+    } else {
+      badge.textContent = `📝 0`;
+      badge.style.background = "linear-gradient(135deg, #9e9e9e, #757575)";
+    }
+    
+    badge.title = `Review count: ${count}`;
     card.style.position = "relative";
     card.appendChild(badge);
   }
 
-  // ─── Create the floating sort button ───
+  // ─── Create sort button ───
   function createSortButton() {
     if (document.getElementById("flipsort-btn")) return;
 
@@ -212,8 +287,6 @@
     `;
     sortButton.addEventListener("click", sortByReviews);
     document.body.appendChild(sortButton);
-
-    // Make it draggable
     makeDraggable(sortButton);
   }
 
@@ -229,7 +302,7 @@
     }
   }
 
-  // ─── Notification Toast ───
+  // ─── Notification ───
   function showNotification(message) {
     const existing = document.getElementById("flipsort-toast");
     if (existing) existing.remove();
@@ -246,7 +319,7 @@
     }, 3000);
   }
 
-  // ─── Make button draggable ───
+  // ─── Make draggable ───
   function makeDraggable(el) {
     let isDragging = false;
     let startX, startY, initialX, initialY;
@@ -277,7 +350,7 @@
     });
   }
 
-  // ─── Auto-detect page changes (Flipkart is SPA) ───
+  // ─── Watch for page changes ───
   function watchForPageChanges() {
     let lastURL = location.href;
 
@@ -294,29 +367,23 @@
 
   // ─── Initialize ───
   function init() {
-    // Wait for products to load
     const checkInterval = setInterval(() => {
       const cards = getProductCards();
       if (cards.length > 0) {
         clearInterval(checkInterval);
         createSortButton();
         watchForPageChanges();
-        console.log(
-          `[FlipSort] ✅ Initialized! Found ${cards.length} products.`
-        );
       }
     }, 1500);
 
-    // Timeout after 30 seconds
     setTimeout(() => {
       clearInterval(checkInterval);
-      // Still create button even if no products found yet
       createSortButton();
       watchForPageChanges();
     }, 30000);
   }
 
-  // Keyboard shortcut: Alt + S to sort
+  // Keyboard shortcut
   document.addEventListener("keydown", (e) => {
     if (e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
@@ -325,24 +392,7 @@
   });
 
   // Start
-  if (
-    location.hostname.includes("flipkart.com") &&
-    (location.search || location.pathname.includes("/search"))
-  ) {
+  if (location.hostname.includes("flipkart.com")) {
     init();
-  } else {
-    // For non-search pages, still watch for navigation
-    watchForPageChanges();
-    // Re-check after navigation
-    setInterval(() => {
-      if (
-        location.search ||
-        location.pathname.includes("/search")
-      ) {
-        if (!document.getElementById("flipsort-btn")) {
-          init();
-        }
-      }
-    }, 3000);
   }
 })();
