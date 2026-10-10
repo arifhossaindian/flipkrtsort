@@ -1,146 +1,77 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Flipkart Sort by Reviews</title>
+  <meta charset="UTF-8" />
   <style>
-    * {
-      margin: 0;
-      padding: 0;
-      box-sizing: border-box;
-    }
-
+    * { margin: 0; padding: 0; box-sizing: border-box; }
     body {
-      width: 320px;
-      font-family: 'Segoe UI', 'Roboto', sans-serif;
-      background: #f5f5f5;
+      width: 280px;
+      font-family: Arial, sans-serif;
+      background: #f5f7fa;
     }
-
     .header {
-      background: linear-gradient(135deg, #2874f0, #1a5dc8);
-      color: white;
-      padding: 20px;
+      background: linear-gradient(135deg, #2874f0, #1a4fb7);
+      color: #fff;
+      padding: 14px;
+      font-size: 15px;
+      font-weight: 700;
       text-align: center;
     }
-
-    .header h1 {
-      font-size: 18px;
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-
-    .header p {
-      font-size: 12px;
-      opacity: 0.85;
-    }
-
-    .content {
-      padding: 20px;
-    }
-
-    .feature {
-      display: flex;
-      align-items: flex-start;
-      gap: 12px;
-      padding: 12px 0;
-      border-bottom: 1px solid #e0e0e0;
-    }
-
-    .feature:last-child {
-      border-bottom: none;
-    }
-
-    .feature-icon {
-      font-size: 24px;
-      flex-shrink: 0;
-    }
-
-    .feature-text h3 {
+    .body { padding: 14px; }
+    button {
+      width: 100%;
+      padding: 10px;
+      margin-bottom: 8px;
+      border: none;
+      border-radius: 8px;
       font-size: 13px;
       font-weight: 600;
-      color: #333;
-      margin-bottom: 2px;
+      cursor: pointer;
+      color: #fff;
     }
-
-    .feature-text p {
-      font-size: 11px;
-      color: #666;
-      line-height: 1.4;
-    }
-
-    .shortcut {
-      background: #e8f0fe;
+    #sortBtn { background: linear-gradient(135deg, #ff9800, #f57c00); }
+    #sortBtn:hover { filter: brightness(1.1); }
+    #restoreBtn { background: linear-gradient(135deg, #2e7d32, #1b5e20); }
+    #restoreBtn:hover { filter: brightness(1.1); }
+    .tips {
+      background: #fff;
       border-radius: 8px;
-      padding: 12px;
-      margin-top: 12px;
-      text-align: center;
-    }
-
-    .shortcut kbd {
-      background: white;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-      padding: 2px 8px;
-      font-family: monospace;
-      font-size: 13px;
-      box-shadow: 0 1px 2px rgba(0,0,0,0.1);
-    }
-
-    .shortcut p {
+      padding: 10px;
       font-size: 11px;
       color: #555;
-      margin-top: 4px;
+      line-height: 1.6;
     }
-
-    .footer {
+    .tips b { color: #2874f0; }
+    #status {
       text-align: center;
-      padding: 12px;
+      font-size: 11px;
+      color: #c62828;
+      margin-top: 6px;
+      min-height: 14px;
+    }
+    .ver {
+      text-align: center;
       font-size: 10px;
       color: #999;
-      border-top: 1px solid #e0e0e0;
+      padding-bottom: 10px;
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>📊 Flipkart Sort by Reviews</h1>
-    <p>Find the most reviewed products instantly</p>
+  <div class="header">📊 Flipkart Sort by Reviews</div>
+  <div class="body">
+    <button id="sortBtn">⬇️ Sort by Reviews (Most → Least)</button>
+    <button id="restoreBtn">🔄 Restore Default Order</button>
+    <div class="tips">
+      <b>How to use:</b><br />
+      1. Flipkart e search/category page open koro<br />
+      2. Products load howa porjonto scroll koro<br />
+      3. Sort button (ba Alt+S) chapo<br />
+      4. Sponsored/Ad products niche chole jabe
+    </div>
+    <div id="status"></div>
   </div>
-
-  <div class="content">
-    <div class="feature">
-      <span class="feature-icon">🔍</span>
-      <div class="feature-text">
-        <h3>How to use</h3>
-        <p>Search anything on Flipkart. Click the floating blue "Sort by Reviews" button on the bottom-right.</p>
-      </div>
-    </div>
-
-    <div class="feature">
-      <span class="feature-icon">📝</span>
-      <div class="feature-text">
-        <h3>Review Badges</h3>
-        <p>Each product gets an orange badge showing its review count after sorting.</p>
-      </div>
-    </div>
-
-    <div class="feature">
-      <span class="feature-icon">🔄</span>
-      <div class="feature-text">
-        <h3>Toggle Back</h3>
-        <p>Click again to restore the original Flipkart order. The button turns red when active.</p>
-      </div>
-    </div>
-
-    <div class="shortcut">
-      <kbd>Alt</kbd> + <kbd>S</kbd>
-      <p>Keyboard shortcut to sort instantly</p>
-    </div>
-  </div>
-
-  <div class="footer">
-    Made with ❤️ for smart shoppers
-  </div>
+  <div class="ver">v5.0.0 • Fake numbers blocked</div>
+  <script src="popup.js"></script>
 </body>
 </html>
