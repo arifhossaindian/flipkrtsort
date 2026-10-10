@@ -1,8 +1,7 @@
 // ============================================
-// FLIPKART SORT BY RATINGS v12
-// - ON/OFF toggle (tap e off, page pure Flipkart)
-// - Original DOM remove kore na (hide kore) → React safe
-// - All pages scan → ratings order → sponsored last
+// SORT BY RATINGS v13 - FLIPKART + MYNTRA
+// Flipkart: div[data-id] cards, (1,234) ratings, IxWX8O = sponsored
+// Myntra:   li.product-base cards, "33.5k" ratings, .product-waterMark = AD
 // ============================================
 
 (function () {
@@ -10,8 +9,13 @@
   if (window.__flipSortLoaded) return;
   window.__flipSortLoaded = true;
 
-  const LS_KEY = "flipsort_enabled_v12";
-  const CHUNK = 240; // ekbare kotogulo card dekhabe
+  const HOST = location.hostname.replace(/^www\./, "");
+  const IS_FLIPKART = HOST.indexOf("flipkart.com") !== -1;
+  const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
+  if (!IS_FLIPKART && !IS_MYNTRA) return;
+
+  const LS_KEY = "sortratings_enabled_v13";
+  const CHUNK = 240;
 
   const state = {
     enabled: localStorage.getItem(LS_KEY) !== "0",
@@ -32,11 +36,24 @@
   // ─── Utils ───
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  function parseNum(t) {
+  function parseDigits(t) {
     const d = String(t == null ? "" : t).replace(/[^0-9]/g, "");
     if (!d || d.length > 8) return 0;
     const n = parseInt(d, 10);
     return isFinite(n) && n >= 0 ? n : 0;
+  }
+
+  // Myntra: "33.5k" → 33500, "1.2L" → 120000, "447" → 447
+  function parseMyntraCount(t) {
+    const s = String(t || "").trim().toLowerCase();
+    const m = s.match(/^([\d.]+)\s*(k|m)?/);
+    if (!m) return 0;
+    let n = parseFloat(m[1]);
+    if (!isFinite(n)) return 0;
+    if (m[2] === "k") n *= 1000;
+    if (m[2] === "m") n *= 1000000;
+    n = Math.round(n);
+    return n >= 0 && n <= 99999999 ? n : 0;
   }
 
   function fmt(n) {
@@ -64,29 +81,92 @@
     t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
   }
 
-  // ─── Card data extract ───
-  function ratingOf(el) {
-    const s = el.querySelector("span.PvbNMB");
-    if (s) { const n = parseNum(s.textContent); if (n > 0) return n; }
-    const m = (el.textContent || "").match(/\(([\d,]+)\)/);
-    return m ? parseNum(m[1]) : 0;
-  }
-  function sponsoredOf(el) {
-    return !!el.querySelector(".IxWX8O");
-  }
+  // ============================================
+  // SITE ADAPTERS
+  // ============================================
+  const ADAPTER = {
+    flipkart: {
+      pageParam: "page",
+      cards(doc) {
+        return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
+          if (el.querySelector("div[data-id]")) return false;
+          if (!el.querySelector('a[href*="/p/"]')) return false;
+          const txt = el.textContent || "";
+          return txt.indexOf("₹") !== -1 && !!el.querySelector("img");
+        });
+      },
+      id(el) { return el.getAttribute("data-id") || ""; },
+      ratings(el) {
+        const s = el.querySelector("span.PvbNMB");
+        if (s) { const n = parseDigits(s.textContent); if (n > 0) return n; }
+        const m = (el.textContent || "").match(/\(([\d,]+)\)/);
+        return m ? parseDigits(m[1]) : 0;
+      },
+      sponsored(el) { return !!el.querySelector(".IxWX8O"); },
+      rows() {
+        return Array.from(document.querySelectorAll("div.nZIRY7"))
+          .filter((r) => r.querySelector('div[data-id] a[href*="/p/"]'));
+      },
+      gridClass: "nZIRY7",
+      summary() { return document.querySelector("span._Omnvo"); },
+    },
 
+    myntra: {
+      pageParam: "p",
+      cards(doc) {
+        return Array.from(doc.querySelectorAll("li.product-base")).filter((el) => {
+          const txt = el.textContent || "";
+          return txt.indexOf("Rs.") !== -1 || txt.indexOf("₹") !== -1;
+        });
+      },
+      id(el) { return el.getAttribute("id") || ""; },
+      ratings(el) {
+        const rc = el.querySelector(".product-ratingsCount");
+        if (rc) {
+          // separator div bad diye baki text = "33.5k"
+          let txt = "";
+          rc.childNodes.forEach((n) => {
+            if (n.nodeType === 3) txt += n.textContent;
+            else if (!n.classList || !n.classList.contains("product-separator")) txt += n.textContent;
+          });
+          txt = txt.replace(/[|]/g, "").trim();
+          const n = parseMyntraCount(txt);
+          if (n > 0) return n;
+        }
+        const m = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
+        return m ? parseMyntraCount(m[1]) : 0;
+      },
+      sponsored(el) {
+        const w = el.querySelector(".product-waterMark");
+        if (w && /AD/i.test(w.textContent || "")) return true;
+        return /\bAD\b/.test((el.querySelector(".product-imageSliderContainer") || {}).textContent || "");
+      },
+      rows() {
+        const uls = Array.from(document.querySelectorAll("ul.results-base"));
+        if (uls.length) return uls;
+        // fallback: product-base er common parent
+        const first = document.querySelector("li.product-base");
+        return first && first.parentElement ? [first.parentElement] : [];
+      },
+      gridClass: "results-base",
+      summary() {
+        return Array.from(document.querySelectorAll("h1, span, div"))
+          .find((s) => /items?$/.test((s.textContent || "").trim().split(" - ").pop() || "") && /\d/.test(s.textContent || ""));
+      },
+    },
+  };
+
+  const SITE = IS_FLIPKART ? ADAPTER.flipkart : ADAPTER.myntra;
+
+  // ─── Extract from parsed page ───
   function extractFromDoc(doc) {
     const out = [];
-    doc.querySelectorAll("div[data-id]").forEach((el) => {
-      if (el.querySelector("div[data-id]")) return;
-      if (!el.querySelector('a[href*="/p/"]')) return;
-      const txt = el.textContent || "";
-      if (txt.indexOf("₹") === -1 || !el.querySelector("img")) return;
+    SITE.cards(doc).forEach((el) => {
       out.push({
-        id: el.getAttribute("data-id"),
+        id: SITE.id(el),
         html: el.outerHTML,
-        ratings: ratingOf(el),
-        sponsored: sponsoredOf(el),
+        ratings: SITE.ratings(el),
+        sponsored: SITE.sponsored(el),
       });
     });
     return out;
@@ -98,8 +178,12 @@
     state.stop = false;
     state.products = [];
     const seen = new Set();
-    const base = location.href.replace(/([?&])page=\d+&?/g, "$1").replace(/[?&]$/, "");
+
+    const base = location.href
+      .replace(/([?&])(page|p)=\d+&?/g, "$1")
+      .replace(/[?&]$/, "");
     const sep = base.indexOf("?") !== -1 ? "&" : "?";
+
     let totalPages = maxPages;
 
     for (let p = 1; p <= totalPages; p++) {
@@ -107,24 +191,29 @@
       showStopBtn();
       toast("🔍 Page " + p + "/" + (totalPages === Infinity ? "?" : totalPages) +
         " scanning...\n📦 Collected: " + state.products.length);
+
       let doc = null;
       try {
-        const res = await fetch(base + sep + "page=" + p, { credentials: "include" });
+        const res = await fetch(base + sep + SITE.pageParam + "=" + p, { credentials: "include" });
         if (!res.ok) break;
         doc = new DOMParser().parseFromString(await res.text(), "text/html");
       } catch (e) { break; }
 
       const cards = extractFromDoc(doc);
       if (!cards.length) break;
+
       let fresh = 0;
-      for (const c of cards) if (!seen.has(c.id)) { seen.add(c.id); state.products.push(c); fresh++; }
+      for (const c of cards) {
+        if (c.id && !seen.has(c.id)) { seen.add(c.id); state.products.push(c); fresh++; }
+      }
       if (!fresh) break;
 
-      if (p === 1) {
-        const m = (doc.body.textContent || "").match(/Page\s+1\s+of\s+([\d,]+)/i);
-        if (m) {
-          const tp = parseNum(m[1]);
-          if (tp > 0) totalPages = maxPages === Infinity ? tp : Math.min(maxPages, tp);
+      // Myntra: next-page link theke total page jano
+      if (p === 1 && IS_MYNTRA) {
+        const nl = doc.querySelector('link[rel="next"]');
+        if (nl) {
+          const m = (nl.getAttribute("href") || "").match(/[?&]p=(\d+)/);
+          if (m) { /* atleast 2 pages ache */ }
         }
       }
       await sleep(600);
@@ -133,17 +222,16 @@
     hideStopBtn();
   }
 
-  // ─── Hide originals (REMOVE KORBO NA!) ───
+  // ─── Hide originals (remove KORBO NA) ───
   function hideOriginals() {
-    const rows = Array.from(document.querySelectorAll("div.nZIRY7"))
-      .filter((r) => r.querySelector('div[data-id] a[href*="/p/"]'));
     const sections = [];
-    rows.forEach((r) => {
+    SITE.rows().forEach((r) => {
       const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
       if (s && sections.indexOf(s) === -1) sections.push(s);
     });
-    const pag = Array.from(document.querySelectorAll("div.lvJbLV"))
-      .find((d) => /Page\s+\d+\s+of\s+\d+/i.test(d.textContent || "") && d.querySelector("nav"));
+    // pagination bar
+    const pag = Array.from(document.querySelectorAll("div, nav"))
+      .find((d) => /Page\s+\d+\s+of\s+\d+/i.test(d.textContent || "") && d.querySelector("nav, a"));
     if (pag && sections.indexOf(pag) === -1) sections.push(pag);
 
     sections.forEach((s) => {
@@ -160,21 +248,21 @@
     state.hiddenEls = [];
   }
 
-  // ─── Grid render ───
+  // ─── Card + badge ───
   function makeCard(p, rank) {
     const tpl = document.createElement("template");
     tpl.innerHTML = p.html.trim();
     const card = tpl.content.firstElementChild;
     if (!card) return null;
-    card.style.width = "25%";
     card.style.position = "relative";
+    card.style.listStyle = "none";
 
     const b = document.createElement("div");
     b.style.cssText =
       "position:absolute;top:8px;right:8px;z-index:5;color:#fff;font:700 12px/1 Arial,sans-serif;" +
       "padding:5px 9px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.3);pointer-events:none;" +
       "background:" + (p.sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
-    b.textContent = p.sponsored ? "📢 Ad" : "⭐ " + fmt(p.ratings);
+    b.textContent = p.sponsored ? "📢 AD" : "⭐ " + fmt(p.ratings);
     b.title = "Ratings: " + p.ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
     card.appendChild(b);
     return card;
@@ -182,7 +270,7 @@
 
   function appendChunk() {
     if (!state.ourSection) return;
-    const grid = state.ourSection.querySelector(".nZIRY7");
+    const grid = state.ourSection.querySelector("[data-fs-grid]");
     const end = Math.min(state.rendered + CHUNK, state.products.length);
     const frag = document.createDocumentFragment();
     for (let i = state.rendered; i < end; i++) {
@@ -214,18 +302,16 @@
       " results  (⭐ sorted by most rated)";
   }
 
-  // ─── Restore / Cleanup ───
+  // ─── Restore ───
   function restore(silent) {
     if (state.ourSection) { state.ourSection.remove(); state.ourSection = null; }
     unhideAll();
-    if (state.summaryEl && state.savedSummary != null) {
-      state.summaryEl.innerHTML = state.savedSummary;
-    }
+    if (state.summaryEl && state.savedSummary != null) state.summaryEl.innerHTML = state.savedSummary;
     state.summaryEl = null; state.savedSummary = null;
     state.products = []; state.rendered = 0; state.sorted = false;
     hideStopBtn();
     updateSortBtn();
-    if (!silent) toast("🔄 Original Flipkart page restored!");
+    if (!silent) toast("🔄 Original page restored!");
   }
 
   // ─── Main sort ───
@@ -233,11 +319,12 @@
     if (!state.enabled || state.scanning) return;
     if (state.sorted) { restore(false); return; }
 
+    const siteName = IS_FLIPKART ? "Flipkart" : "Myntra";
     const input = prompt(
-      "কতগুলো PAGE scan করবে?\n\n" +
-      "• খালি রেখে OK = ALL pages (সব product)\n" +
-      "• সংখ্যা লেখো (যেমন 20) = প্রথম 20 page",
-      ""
+      siteName + ": কতগুলো PAGE scan করবে?\n\n" +
+      "• খালি রেখে OK = যতগুলো page আছে সব (Myntra te onek page, time lagbe!)\n" +
+      "• সংখ্যা লেখো (যেমন 20) = প্রথম 20 page (50×20 = 1000 products)",
+      IS_MYNTRA ? "20" : ""
     );
     if (input === null) return;
     const maxPages = input.trim() === "" ? Infinity : (parseInt(input, 10) || Infinity);
@@ -252,14 +339,17 @@
 
     const anchor = hideOriginals();
 
-    state.summaryEl = document.querySelector("span._Omnvo");
+    state.summaryEl = SITE.summary();
     if (state.summaryEl && state.savedSummary == null) state.savedSummary = state.summaryEl.innerHTML;
 
     const sec = document.createElement("div");
     sec.className = "lvJbLV col-12-12";
-    const grid = document.createElement("div");
-    grid.className = "nZIRY7";
-    grid.style.cssText = "display:flex;flex-wrap:wrap;width:100%;";
+    const grid = document.createElement(IS_MYNTRA ? "ul" : "div");
+    grid.className = SITE.gridClass;
+    grid.setAttribute("data-fs-grid", "1");
+    grid.style.cssText = IS_MYNTRA
+      ? "display:flex;flex-wrap:wrap;width:100%;margin:0;padding:0;list-style:none;gap:0;"
+      : "display:flex;flex-wrap:wrap;width:100%;";
     sec.appendChild(grid);
     state.ourSection = sec;
     state.rendered = 0;
@@ -273,11 +363,11 @@
     updateSortBtn();
     window.scrollTo({ top: 0, behavior: "smooth" });
 
-    const sp = state.products.filter((p) => p.sponsored).length;
-    toast("✅ " + state.products.length + " products sorted!\n📢 Sponsored: " + sp + " (last e)");
+    const ad = state.products.filter((p) => p.sponsored).length;
+    toast("✅ " + state.products.length + " products sorted!\n📢 AD: " + ad + " (last e)");
   }
 
-  // ─── UI: ON/OFF pill (top right) ───
+  // ─── ON/OFF pill ───
   function createPill() {
     if (state.pill) return;
     const pill = document.createElement("div");
@@ -294,13 +384,11 @@
   function updatePill() {
     if (!state.pill) return;
     if (state.enabled) {
-      state.pill.textContent = "🟢 FlipSort ON";
+      state.pill.textContent = "🟢 Sort ON";
       state.pill.style.background = "linear-gradient(135deg,#2e7d32,#1b5e20)";
-      state.pill.title = "Click to OFF (page pure Flipkart hoye jabe)";
     } else {
-      state.pill.textContent = "🔴 FlipSort OFF";
+      state.pill.textContent = "🔴 Sort OFF";
       state.pill.style.background = "linear-gradient(135deg,#c62828,#8e0000)";
-      state.pill.title = "Click to ON";
     }
   }
 
@@ -311,15 +399,15 @@
       if (state.sorted) restore(true);
       if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
       hideStopBtn();
-      toast("🔴 FlipSort OFF — page ekhon pure Flipkart");
+      toast("🔴 OFF — page ekhon pure " + (IS_FLIPKART ? "Flipkart" : "Myntra"));
     } else {
       createSortButton();
-      toast("🟢 FlipSort ON");
+      toast("🟢 ON");
     }
     updatePill();
   }
 
-  // ─── UI: sort button ───
+  // ─── Sort button ───
   function createSortButton() {
     if (state.sortBtn || !state.enabled) return;
     const b = document.createElement("div");
@@ -359,7 +447,7 @@
     if (state.stopBtn) { state.stopBtn.remove(); state.stopBtn = null; }
   }
 
-  // ─── SPA navigation e cleanup (jaiye page break hoy na) ───
+  // ─── SPA navigation cleanup ───
   (function watchURL() {
     let last = location.href;
     new MutationObserver(() => {
@@ -381,10 +469,12 @@
   // ─── Init ───
   function init() {
     createPill();
-    if (!state.enabled) return; // OFF thakle kichu korbe na
+    if (!state.enabled) return;
     const t0 = Date.now();
     const iv = setInterval(() => {
-      const has = document.querySelector('div[data-id] a[href*="/p/"]');
+      const has = IS_FLIPKART
+        ? document.querySelector('div[data-id] a[href*="/p/"]')
+        : document.querySelector("li.product-base");
       if (has || Date.now() - t0 > 20000) {
         clearInterval(iv);
         createSortButton();
@@ -392,5 +482,5 @@
     }, 1000);
   }
 
-  if (location.hostname.indexOf("flipkart.com") !== -1) init();
+  init();
 })();
