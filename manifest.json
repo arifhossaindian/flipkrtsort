@@ -1,14 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Flipkart Sort by Reviews",
-  "version": "1.0.0",
+  "version": "5.0.0",
   "description": "Sort Flipkart search results by number of reviews/ratings. Shows most reviewed products first.",
   "content_scripts": [
     {
-      "matches": [
-        "https://www.flipkart.com/*",
-        "https://flipkart.com/*"
-      ],
+      "matches": ["https://www.flipkart.com/*", "https://flipkart.com/*"],
       "js": ["content.js"],
       "css": ["styles.css"],
       "run_at": "document_idle"
