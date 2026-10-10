@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "Flipkart Sort by Reviews",
-  "version": "5.0.0",
-  "description": "Sort Flipkart search results by number of reviews/ratings. Shows most reviewed products first.",
+  "name": "Flipkart + Myntra Sort by Ratings",
+  "version": "13.0.0",
+  "description": "Sort Flipkart & Myntra results by ratings count. Sponsored/AD products at the end.",
   "content_scripts": [
     {
-      "matches": ["https://www.flipkart.com/*", "https://flipkart.com/*"],
+      "matches": [
+        "https://www.flipkart.com/*",
+        "https://flipkart.com/*",
+        "https://www.myntra.com/*",
+        "https://myntra.com/*"
+      ],
       "js": ["content.js"],
-      "css": ["styles.css"],
       "run_at": "document_idle"
     }
-  ],
-  "action": {
-    "default_popup": "popup.html"
-  }
+  ]
 }
