@@ -1,7 +1,7 @@
 // ============================================
-// SORT BY RATINGS v16 - MULTI-PAGE SCAN
-// User manually page number input করবে
-// সব page fetch → collect → sort → rearrange
+// SORT BY RATINGS v17 - rel=next PAGINATION CRAWL
+// Myntra/Flipkart er official next-page link follow kore
+// Retry + debug logs soho
 // ============================================
 
 (function () {
@@ -14,7 +14,7 @@
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
   if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const LS_KEY = "sortratings_enabled_v16";
+  const LS_KEY = "sortratings_enabled_v17";
 
   const state = {
     enabled: localStorage.getItem(LS_KEY) !== "0",
@@ -22,7 +22,6 @@
     scanning: false,
     stop: false,
     originalOrder: [],
-    sortedData: [],
     allProducts: [],
     pill: null,
     sortBtn: null,
@@ -31,7 +30,6 @@
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ─── Parse number ───
   function parseDigits(t) {
     const d = String(t == null ? "" : t).replace(/[^0-9]/g, "");
     if (!d || d.length > 8) return 0;
@@ -39,7 +37,6 @@
     return isFinite(n) && n >= 0 ? n : 0;
   }
 
-  // Myntra: "33.5k", "10.8k" → number
   function parseMyntraCount(t) {
     let s = String(t || "").trim().toLowerCase();
     s = s.replace(/^[^0-9]+/, "");
@@ -47,10 +44,9 @@
     if (!m) return 0;
     let n = parseFloat(m[1]);
     if (!isFinite(n) || n < 0) return 0;
-    const suffix = m[2];
-    if (suffix === "k") n *= 1000;
-    else if (suffix === "m") n *= 1000000;
-    else if (suffix === "l") n *= 100000;
+    if (m[2] === "k") n *= 1000;
+    else if (m[2] === "m") n *= 1000000;
+    else if (m[2] === "l") n *= 100000;
     n = Math.round(n);
     return n >= 0 && n <= 99999999 ? n : 0;
   }
@@ -80,7 +76,7 @@
     t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
   }
 
-  // ─── Get products from DOM ───
+  // ─── Products from DOM ───
   function getProductsFromDOM() {
     if (IS_FLIPKART) {
       return Array.from(document.querySelectorAll("div[data-id]")).filter((el) => {
@@ -89,245 +85,203 @@
         const txt = el.textContent || "";
         return txt.indexOf("₹") !== -1 && !!el.querySelector("img");
       });
-    } else {
-      return Array.from(document.querySelectorAll("li.product-base")).filter((el) => {
-        return !!el.querySelector(".product-ratingsContainer");
-      });
     }
+    return Array.from(document.querySelectorAll("li.product-base")).filter((el) =>
+      !!el.querySelector(".product-ratingsContainer")
+    );
   }
 
-  // ─── Get ratings count ───
   function getRatings(el) {
     if (IS_FLIPKART) {
       const s = el.querySelector("span.PvbNMB");
-      if (s) {
-        const n = parseDigits(s.textContent);
-        if (n > 0) return n;
-      }
+      if (s) { const n = parseDigits(s.textContent); if (n > 0) return n; }
       const m = (el.textContent || "").match(/\(([\d,]+)\)/);
       return m ? parseDigits(m[1]) : 0;
-    } else {
-      const rc = el.querySelector(".product-ratingsCount");
-      if (!rc) return 0;
-      const txt = rc.textContent || "";
-      return parseMyntraCount(txt);
     }
+    const rc = el.querySelector(".product-ratingsCount");
+    return rc ? parseMyntraCount(rc.textContent || "") : 0;
   }
 
-  // ─── Check sponsored ───
   function isSponsored(el) {
-    if (IS_FLIPKART) {
-      return !!el.querySelector(".IxWX8O");
-    } else {
-      const w = el.querySelector(".product-waterMark");
-      return w ? /AD/i.test(w.textContent || "") : false;
-    }
+    if (IS_FLIPKART) return !!el.querySelector(".IxWX8O");
+    const w = el.querySelector(".product-waterMark");
+    return w ? /AD/i.test(w.textContent || "") : false;
   }
 
-  // ─── Extract products from HTML string ───
-  function extractFromHTML(html) {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(html, "text/html");
-    const products = [];
+  // ─── Extract from parsed HTML doc ───
+  function extractFromDoc(doc) {
+    const out = [];
+    const nodes = IS_FLIPKART
+      ? doc.querySelectorAll("div[data-id]")
+      : doc.querySelectorAll("li.product-base");
 
-    if (IS_FLIPKART) {
-      doc.querySelectorAll("div[data-id]").forEach((el) => {
+    nodes.forEach((el) => {
+      if (IS_FLIPKART) {
         if (el.querySelector("div[data-id]")) return;
         if (!el.querySelector('a[href*="/p/"]')) return;
         const txt = el.textContent || "";
         if (txt.indexOf("₹") === -1 || !el.querySelector("img")) return;
-
-        const id = el.getAttribute("data-id");
-        const tpl = document.createElement("template");
-        tpl.innerHTML = el.outerHTML.trim();
-        const node = tpl.content.firstElementChild;
-        if (node) {
-          products.push({
-            id,
-            node,
-            ratings: getRatings(node),
-            sponsored: isSponsored(node),
-          });
-        }
-      });
-    } else {
-      doc.querySelectorAll("li.product-base").forEach((el) => {
+      } else {
         if (!el.querySelector(".product-ratingsContainer")) return;
-        const id = el.getAttribute("id");
-        const tpl = document.createElement("template");
-        tpl.innerHTML = el.outerHTML.trim();
-        const node = tpl.content.firstElementChild;
-        if (node) {
-          products.push({
-            id,
-            node,
-            ratings: getRatings(node),
-            sponsored: isSponsored(node),
-          });
-        }
+      }
+      const tpl = document.createElement("template");
+      tpl.innerHTML = el.outerHTML.trim();
+      const node = tpl.content.firstElementChild;
+      if (!node) return;
+      out.push({
+        id: IS_FLIPKART ? el.getAttribute("data-id") : el.getAttribute("id"),
+        node,
+        ratings: getRatings(node),
+        sponsored: isSponsored(node),
       });
-    }
-
-    return products;
+    });
+    return out;
   }
 
-  // ─── Fetch multiple pages and collect all products ───
+  // ─── 🔑 Official next-page link khuje ber kora ───
+  function getNextLink(doc) {
+    const l = doc.querySelector('link[rel="next"]');
+    if (!l) return null;
+    const href = l.getAttribute("href");
+    if (!href || href.indexOf("http") !== 0 && href.indexOf("/") !== 0) return null;
+    try { return new URL(href, doc.baseURI || location.href).href; } catch (e) { return null; }
+  }
+
+  // ─── Fetch with retry ───
+  async function fetchPage(url) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        const res = await fetch(url, {
+          credentials: "include",
+          redirect: "follow",
+          headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
+        });
+        if (!res.ok) {
+          console.warn("[SortRatings] HTTP " + res.status + " → " + url);
+          if (attempt === 1) { await sleep(1500); continue; }
+          return null;
+        }
+        return await res.text();
+      } catch (e) {
+        console.warn("[SortRatings] fetch error:", e);
+        if (attempt === 1) { await sleep(1500); continue; }
+        return null;
+      }
+    }
+    return null;
+  }
+
+  // ─── Multi-page collect ───
   async function fetchAllPages(maxPages) {
     state.scanning = true;
     state.stop = false;
     state.allProducts = [];
-    const seenIds = new Set();
-
+    const seen = new Set();
     showStopBtn();
 
-    const base = location.href
-      .replace(/([?&])(page|p)=\d+&?/g, "$1")
-      .replace(/[?&]$/, "");
-    const sep = base.indexOf("?") !== -1 ? "&" : "?";
-    const pageParam = IS_FLIPKART ? "page" : "p";
-
-    // First: get current page products
-    const currentProducts = getProductsFromDOM();
-    currentProducts.forEach((el) => {
+    // Page 1 = current DOM
+    getProductsFromDOM().forEach((el) => {
       const id = IS_FLIPKART ? el.getAttribute("data-id") : el.getAttribute("id");
-      if (id && !seenIds.has(id)) {
-        seenIds.add(id);
-        state.allProducts.push({
-          id,
-          node: el,
-          ratings: getRatings(el),
-          sponsored: isSponsored(el),
-        });
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        state.allProducts.push({ id, node: el, ratings: getRatings(el), sponsored: isSponsored(el) });
       }
     });
+    console.log("[SortRatings] page 1 (current DOM):", state.allProducts.length);
 
-    toast(`📦 Page 1 collected: ${state.allProducts.length} products`);
+    // Fallback URL builder
+    const base = location.href.replace(/([?&])(page|p)=\d+&?/g, "$1").replace(/[?&]$/, "");
+    const sep = base.indexOf("?") !== -1 ? "&" : "?";
+    const param = IS_FLIPKART ? "page" : "p";
 
-    // Fetch remaining pages
-    for (let p = 2; p <= maxPages && !state.stop; p++) {
-      toast(`🔍 Fetching page ${p}/${maxPages}...\n📦 Total: ${state.allProducts.length}`);
+    let nextUrl = getNextLink(document) || (base + sep + param + "=2");
+    let pageNum = 2;
+    let pagesOk = 0, pagesFail = 0, dupStreak = 0;
 
-      try {
-        const url = base + sep + pageParam + "=" + p;
-        const res = await fetch(url, { credentials: "include" });
-        if (!res.ok) {
-          toast(`⚠️ Page ${p} failed. Stopping at ${p - 1} pages.`);
-          break;
-        }
+    while (nextUrl && pageNum <= maxPages && !state.stop && dupStreak < 2) {
+      toast("🔍 Page " + pageNum + "/" + maxPages + " fetching...\n📦 Total: " + state.allProducts.length);
 
-        const html = await res.text();
-        const products = extractFromHTML(html);
-
-        let fresh = 0;
-        products.forEach((prod) => {
-          if (prod.id && !seenIds.has(prod.id)) {
-            seenIds.add(prod.id);
-            state.allProducts.push(prod);
-            fresh++;
-          }
-        });
-
-        if (fresh === 0) {
-          toast(`✅ No new products on page ${p}. Stopping.`);
-          break;
-        }
-
-        await sleep(800);
-      } catch (e) {
-        toast(`⚠️ Error on page ${p}. Stopping.`);
-        break;
+      const html = await fetchPage(nextUrl);
+      if (!html) {
+        pagesFail++;
+        nextUrl = base + sep + param + "=" + (pageNum + 1);
+        pageNum++;
+        continue;
       }
+
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const products = extractFromDoc(doc);
+
+      let fresh = 0;
+      products.forEach((p) => {
+        if (p.id && !seen.has(p.id)) { seen.add(p.id); state.allProducts.push(p); fresh++; }
+      });
+
+      console.log("[SortRatings] page", pageNum, "→ products:", products.length, "fresh:", fresh);
+
+      if (!products.length || !fresh) {
+        pagesFail++;
+        dupStreak++;
+      } else {
+        pagesOk++;
+        dupStreak = 0;
+      }
+
+      // 🔑 Next page: official rel=next, na thakle constructed URL
+      nextUrl = getNextLink(doc) || (fresh ? base + sep + param + "=" + (pageNum + 1) : null);
+      pageNum++;
+      await sleep(700);
     }
 
     state.scanning = false;
     hideStopBtn();
+    console.log("[SortRatings] DONE. pagesOk:", pagesOk, "pagesFail:", pagesFail, "total:", state.allProducts.length);
     return state.allProducts;
   }
 
-  // ─── Sort and rearrange ───
+  // ─── Sort + rearrange (DOM node move) ───
   function sortAndRearrange(products) {
     if (!products.length) return;
 
-    // Extract data
-    const data = products.map((prod, idx) => ({
-      node: prod.node,
-      idx,
-      ratings: prod.ratings,
-      sponsored: prod.sponsored,
-    }));
-
-    // Save original order
+    const data = products.map((p, idx) => ({ node: p.node, idx, ratings: p.ratings, sponsored: p.sponsored }));
     state.originalOrder = products.map((p) => p.node);
-    state.sortedData = data;
 
-    // Sort: sponsored last, then by ratings descending
     data.sort((a, b) => {
       if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
       if (b.ratings !== a.ratings) return b.ratings - a.ratings;
       return a.idx - b.idx;
     });
 
-    // Get parent container
     const parent = products[0].node.parentElement;
-    if (!parent) {
-      alert("❌ Parent container not found!");
-      return;
-    }
+    if (!parent) { alert("❌ Parent container not found!"); return; }
 
-    // Add badges
-    data.forEach((d, rank) => {
-      addBadge(d.node, d.ratings, rank, d.sponsored);
-    });
-
-    // Re-append in sorted order
-    data.forEach((d) => {
-      parent.appendChild(d.node);
-    });
+    data.forEach((d, rank) => addBadge(d.node, d.ratings, rank, d.sponsored));
+    data.forEach((d) => parent.appendChild(d.node));
 
     state.sorted = true;
     updateSortBtn();
 
-    const sponsoredCount = data.filter((d) => d.sponsored).length;
-    const maxRatings = data.length > 0 ? data[0].ratings : 0;
-
-    toast(
-      `✅ ${data.length} products sorted!\n` +
-      `🏆 Most rated: ${fmt(maxRatings)}\n` +
-      `📢 Sponsored: ${sponsoredCount} (last)`
-    );
-
+    const ads = data.filter((d) => d.sponsored).length;
+    toast("✅ " + data.length + " products sorted!\n🏆 Top: " + fmt(data[0].ratings) + " ratings\n📢 AD: " + ads + " (last e)");
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  // ─── Restore original order ───
   function restoreOriginal() {
     if (!state.originalOrder.length) return;
-
-    // Remove badges
     document.querySelectorAll(".fs-badge").forEach((el) => el.remove());
-
-    // Get parent
     const parent = state.originalOrder[0].parentElement;
     if (!parent) return;
-
-    // Re-append in original order
-    state.originalOrder.forEach((node) => {
-      parent.appendChild(node);
-    });
-
+    state.originalOrder.forEach((node) => parent.appendChild(node));
     state.sorted = false;
     state.originalOrder = [];
-    state.sortedData = [];
     state.allProducts = [];
     updateSortBtn();
     toast("🔄 Original order restored!");
   }
 
-  // ─── Add badge ───
   function addBadge(node, ratings, rank, sponsored) {
     const old = node.querySelector(".fs-badge");
     if (old) old.remove();
-
     const b = document.createElement("div");
     b.className = "fs-badge";
     b.style.cssText =
@@ -336,54 +290,37 @@
       "background:" + (sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
     b.textContent = sponsored ? "📢 AD" : "⭐ " + fmt(ratings);
     b.title = "Ratings: " + ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
-
     node.style.position = "relative";
     node.appendChild(b);
   }
 
-  // ─── Main sort ───
+  // ─── Main ───
   async function sortByRatings() {
     if (!state.enabled || state.scanning) return;
-    if (state.sorted) {
-      restoreOriginal();
-      return;
-    }
+    if (state.sorted) { restoreOriginal(); return; }
 
-    const siteName = IS_FLIPKART ? "Flipkart" : "Myntra";
-    const productsPerPage = IS_FLIPKART ? 40 : 50;
-
+    const perPage = IS_FLIPKART ? 40 : 50;
     const input = prompt(
-      `${siteName}: কতগুলো PAGE scan করবে?\n\n` +
-      `প্রতি page এ ${productsPerPage} products\n\n` +
-      `Examples:\n` +
-      `• 10 pages = ${productsPerPage * 10} products\n` +
-      `• 50 pages = ${productsPerPage * 50} products\n` +
-      `• 100 pages = ${productsPerPage * 100} products\n\n` +
-      `কত page scan করবে? (number লেখো):`,
+      (IS_FLIPKART ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n\n" +
+      "প্রতি page = " + perPage + " products\n" +
+      "10 page = " + (perPage * 10) + " | 50 page = " + (perPage * 50) + "\n\nসংখ্যা লেখো:",
       "10"
     );
-
     if (input === null) return;
-
     const maxPages = parseInt(input.trim(), 10);
-    if (!maxPages || maxPages < 1) {
-      alert("❌ Invalid number! 1 or more দাও।");
-      return;
-    }
-
-    toast(`🚀 Scanning ${maxPages} pages... This may take time`);
+    if (!maxPages || maxPages < 1) { alert("❌ সঠিক সংখ্যা দাও!"); return; }
 
     const products = await fetchAllPages(maxPages);
+    if (!products.length) { alert("❌ কোনো product collect হয়নি!"); return; }
 
-    if (!products.length) {
-      alert("❌ কোনো product collect হয়নি!");
-      return;
+    if (products.length <= perPage) {
+      toast("⚠️ শুধু current page collect হয়েছে (" + products.length + ")\nSite multi-page block করছে। Console log দেখো (F12)");
     }
 
     sortAndRearrange(products);
   }
 
-  // ─── ON/OFF pill ───
+  // ─── UI ───
   function createPill() {
     if (state.pill) return;
     const pill = document.createElement("div");
@@ -410,32 +347,23 @@
 
   function setEnabled(on) {
     state.enabled = on;
-    try {
-      localStorage.setItem(LS_KEY, on ? "1" : "0");
-    } catch (e) {}
+    try { localStorage.setItem(LS_KEY, on ? "1" : "0"); } catch (e) {}
     if (!on) {
       if (state.sorted) restoreOriginal();
-      if (state.sortBtn) {
-        state.sortBtn.remove();
-        state.sortBtn = null;
-      }
+      if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
       hideStopBtn();
       toast("🔴 OFF");
-    } else {
-      createSortButton();
-      toast("🟢 ON");
-    }
+    } else { createSortButton(); toast("🟢 ON"); }
     updatePill();
   }
 
-  // ─── Sort button ───
   function createSortButton() {
     if (state.sortBtn || !state.enabled) return;
     const b = document.createElement("div");
     b.style.cssText =
       "position:fixed;right:26px;bottom:30px;z-index:2147483647;cursor:pointer;user-select:none;" +
       "color:#fff;border-radius:30px;padding:13px 22px;font:700 14px Arial,sans-serif;" +
-      "box-shadow:0 4px 16px rgba(0,0,0,.35);transition:transform .15s;";
+      "box-shadow:0 4px 16px rgba(0,0,0,.35);";
     b.addEventListener("click", sortByRatings);
     document.body.appendChild(b);
     state.sortBtn = b;
@@ -460,21 +388,16 @@
     s.style.cssText =
       "position:fixed;right:26px;bottom:88px;z-index:2147483647;cursor:pointer;background:#d32f2f;" +
       "color:#fff;border-radius:20px;padding:9px 18px;font:700 13px Arial,sans-serif;";
-    s.onclick = () => {
-      state.stop = true;
-    };
+    s.onclick = () => { state.stop = true; };
     document.body.appendChild(s);
     state.stopBtn = s;
   }
 
   function hideStopBtn() {
-    if (state.stopBtn) {
-      state.stopBtn.remove();
-      state.stopBtn = null;
-    }
+    if (state.stopBtn) { state.stopBtn.remove(); state.stopBtn = null; }
   }
 
-  // ─── SPA navigation cleanup ───
+  // ─── SPA cleanup ───
   (function watchURL() {
     let last = location.href;
     new MutationObserver(() => {
@@ -485,7 +408,6 @@
     }).observe(document.body, { childList: true, subtree: true });
   })();
 
-  // ─── Keyboard ───
   document.addEventListener("keydown", (e) => {
     if (e.altKey && e.key.toLowerCase() === "s") {
       e.preventDefault();
@@ -493,14 +415,12 @@
     }
   });
 
-  // ─── Init ───
   function init() {
     createPill();
     if (!state.enabled) return;
     const t0 = Date.now();
     const iv = setInterval(() => {
-      const has = getProductsFromDOM().length > 0;
-      if (has || Date.now() - t0 > 20000) {
+      if (getProductsFromDOM().length > 0 || Date.now() - t0 > 20000) {
         clearInterval(iv);
         createSortButton();
       }
