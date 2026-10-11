@@ -1,7 +1,8 @@
 // ============================================
-// SORT BY RATINGS v19 - BACKGROUND TAB SCANNER
-// Real background tab e page load kore (bot detect hoy na)
-// Own clean grid, AD last, ON/OFF pill
+// SORT BY RATINGS v20
+// - Myntra embedded JSON theke img + exact ratingCount + AD flag
+// - http:// img → https:// (mixed-content fix)
+// - Worker wait optimized
 // ============================================
 
 (function () {
@@ -14,7 +15,7 @@
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
   if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const LS_KEY = "sortratings_enabled_v19";
+  const LS_KEY = "sortratings_enabled_v20";
   const CHUNK = 200;
 
   const state = {
@@ -60,6 +61,18 @@
     return String(n);
   }
 
+  function cleanStr(s) {
+    return String(s)
+      .replace(/\\u002F/gi, "/")
+      .replace(/\\\//g, "/")
+      .replace(/\\"/g, '"')
+      .replace(/\\\\/g, "\\");
+  }
+
+  function httpsify(u) {
+    return String(u || "").replace(/^http:/, "https:");
+  }
+
   function toast(msg) {
     let t = document.getElementById("fs-toast");
     if (!t) {
@@ -75,7 +88,7 @@
     t.textContent = msg;
     t.style.opacity = "1";
     clearTimeout(t._timer);
-    t._timer = setTimeout(() => (t.style.opacity = "0"), 4000);
+    t._timer = setTimeout(() => (t.style.opacity = "0"), 4500);
   }
 
   function logLine(msg) {
@@ -98,31 +111,87 @@
     }, sec * 1000);
   }
 
-  // ─── Card data ───
-  function cardData(el) {
+  // ============================================
+  // 🔑 MYNTRA EMBEDDED JSON PARSER
+  // searchImage + ratingCount + isPLA/adSource ekdom exact
+  // ============================================
+  function parseJsonProducts(doc) {
+    const map = new Map();
+    const scripts = doc.querySelectorAll("script");
+    for (const sc of scripts) {
+      const txt = sc.textContent || "";
+      if (txt.indexOf('"productId":') === -1 || txt.indexOf('"ratingCount":') === -1) continue;
+      const re = /"productId":(\d+)/g;
+      let m;
+      while ((m = re.exec(txt))) {
+        const id = m[1];
+        if (map.has(id)) continue;
+        const start = m.index;
+        const nextIdx = txt.indexOf('"productId":', start + 10);
+        const end = nextIdx === -1 ? start + 3000 : nextIdx;
+        const chunk = txt.slice(start, end);
+        const pre = txt.slice(Math.max(0, start - 900), start);
+
+        const rc = chunk.match(/"ratingCount":(\d+)/);
+        const im = chunk.match(/"searchImage":"([^"]+)"/);
+        const pla = chunk.match(/"isPLA":(true|false)/);
+        const adsrc = chunk.match(/"adSource":"([^"]*)"/);
+        const br = chunk.match(/"brand":"([^"]*)"/);
+        const nm = chunk.match(/"product":"([^"]*)"/);
+        const lp = pre.match(/"landingPageUrl":"([^"]+)"/);
+
+        map.set(id, {
+          ratings: rc ? (parseInt(rc[1], 10) || 0) : 0,
+          img: im ? httpsify(cleanStr(im[1])) : "",
+          sponsored: pla ? pla[1] === "true" : false,
+          adSource: adsrc ? cleanStr(adsrc[1]) : "",
+          brand: br ? cleanStr(br[1]) : "",
+          name: nm ? cleanStr(nm[1]) : "",
+          href: lp ? cleanStr(lp[1]) : "",
+        });
+      }
+    }
+    return map;
+  }
+
+  // ─── Card data (JSON + DOM merge) ───
+  function cardData(el, map) {
     if (IS_MYNTRA) {
       const id = el.getAttribute("id") || "";
+      const j = (map && map.get(id)) || null;
       const a = el.querySelector("a[href]");
       let href = "";
       try { href = a ? new URL(a.getAttribute("href"), location.origin).href : ""; } catch (e) {}
-      const img = el.querySelector("img");
-      const rc = el.querySelector(".product-ratingsCount");
-      let ratings = rc ? parseK(rc.textContent) : 0;
-      if (!ratings) {
-        const m = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
-        if (m) ratings = parseK(m[1]);
+      if (!href && j && j.href) {
+        try { href = new URL(j.href, location.origin).href; } catch (e) {}
       }
+      const img = el.querySelector("img");
+      let domImg = img ? (img.src || img.getAttribute("data-src") || "") : "";
+      domImg = httpsify(domImg);
+
+      const rc = el.querySelector(".product-ratingsCount");
+      let domRatings = rc ? parseK(rc.textContent) : 0;
+      if (!domRatings) {
+        const m2 = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
+        if (m2) domRatings = parseK(m2[1]);
+      }
+
       const w = el.querySelector(".product-waterMark");
+      const domAd = w ? /AD/i.test(w.textContent || "") : false;
+
       return {
-        id, href,
-        img: img ? (img.src || img.getAttribute("data-src") || "") : "",
-        brand: (el.querySelector(".product-brand") || {}).textContent || "",
-        name: (el.querySelector(".product-product") || {}).textContent || "",
+        id,
+        href,
+        img: (j && j.img) ? j.img : domImg,
+        brand: (j && j.brand) ? j.brand : ((el.querySelector(".product-brand") || {}).textContent || ""),
+        name: (j && j.name) ? j.name : ((el.querySelector(".product-product") || {}).textContent || ""),
         price: ((el.querySelector(".product-discountedPrice") || {}).textContent || "").trim(),
-        ratings,
-        sponsored: w ? /AD/i.test(w.textContent || "") : false,
+        ratings: (j && j.ratings > 0) ? j.ratings : domRatings,
+        sponsored: domAd || (j ? (j.sponsored || /PLA|AD/i.test(j.adSource || "")) : false),
       };
     }
+
+    // Flipkart
     const id = el.getAttribute("data-id") || "";
     const a = el.querySelector('a[href*="/p/"]');
     const img = el.querySelector("img");
@@ -136,7 +205,7 @@
     return {
       id,
       href: a ? a.href : "",
-      img: img ? (img.src || img.getAttribute("data-src") || "") : "",
+      img: httpsify(img ? (img.src || img.getAttribute("data-src") || "") : ""),
       brand: "",
       name: (el.querySelector("a[title]") || {}).title || "",
       price: pm ? pm[0] : "",
@@ -146,9 +215,7 @@
   }
 
   function productEls(doc) {
-    if (IS_MYNTRA) {
-      return Array.from(doc.querySelectorAll("li.product-base"));
-    }
+    if (IS_MYNTRA) return Array.from(doc.querySelectorAll("li.product-base"));
     return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
       if (el.querySelector("div[data-id]")) return false;
       if (!el.querySelector('a[href*="/p/"]')) return false;
@@ -157,10 +224,11 @@
   }
 
   function extractLive() {
-    return productEls(document).map(cardData);
+    const map = IS_MYNTRA ? parseJsonProducts(document) : null;
+    return productEls(document).map((el) => cardData(el, map));
   }
 
-  // ─── WORKER MODE (background tab hole) ───
+  // ─── WORKER MODE ───
   try {
     chrome.runtime.sendMessage({ type: "FS_WORKER_READY" }, (resp) => {
       if (chrome.runtime.lastError) return;
@@ -169,25 +237,26 @@
       (async () => {
         const t0 = Date.now();
         let els = [];
-        while (Date.now() - t0 < 15000) {
+        while (Date.now() - t0 < 12000) {
           els = productEls(document);
           if (els.length) break;
           await sleep(500);
         }
-        await sleep(1000);
+        await sleep(1200);
         els = productEls(document);
+        const map = IS_MYNTRA ? parseJsonProducts(document) : null;
         try {
           chrome.runtime.sendMessage({
             type: "FS_WORKER_DONE",
             scanId: resp.scanId,
-            products: els.map(cardData),
+            products: els.map((el) => cardData(el, map)),
           });
         } catch (e) {}
       })();
     });
   } catch (e) {}
 
-  // ─── MAIN TAB listener ───
+  // ─── MAIN listener ───
   try {
     chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (msg.type === "FS_PROGRESS" && msg.scanId === state.scanId) {
@@ -197,7 +266,7 @@
       if (msg.type === "FS_SCAN_DONE" && msg.scanId === state.scanId && state.pendingDone) {
         const cb = state.pendingDone;
         state.pendingDone = null;
-        cb(msg.products || []);
+        cb(msg);
       }
       if (sendResponse) sendResponse({ ok: true });
       return false;
@@ -211,19 +280,19 @@
       const param = IS_FLIPKART ? "page" : "p";
       const urls = [];
       for (let p = 2; p <= maxPages; p++) urls.push(base + sep + param + "=" + p);
-      if (!urls.length) { resolve([]); return; }
+      if (!urls.length) { resolve({ products: [], stoppedEarly: false }); return; }
       state.scanId = "S" + Date.now();
       state.pendingDone = resolve;
       chrome.runtime.sendMessage({ type: "FS_SCAN_START", scanId: state.scanId, urls }, () => {
         if (chrome.runtime.lastError) {
           state.pendingDone = null;
-          resolve([]);
+          resolve({ products: [], stoppedEarly: false });
         }
       });
     });
   }
 
-  // ─── Own grid render ───
+  // ─── Own grid ───
   function injectCSS() {
     if (document.getElementById("fs-css")) return;
     const s = document.createElement("style");
@@ -345,9 +414,9 @@
     const input = prompt(
       (IS_FLIPKART ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n" +
       "(প্রতি page = " + per + " products)\n\n" +
-      "5 = " + per * 5 + " | 20 = " + per * 20 + " | 100 = " + per * 100 + "\n\n" +
-      "Scan এর সময় background tab khulbe-bandho hobe (normal, click korো না)",
-      "5"
+      "10 = " + per * 10 + " | 30 = " + per * 30 + " | 100 = " + per * 100 + "\n\n" +
+      "(Tab gulo apna thekei khulbe-bandho hobe)",
+      "10"
     );
     if (input === null) return;
     const maxPages = parseInt(input.trim(), 10);
@@ -355,7 +424,7 @@
 
     state.scanning = true;
     showStopBtn();
-    logLine("== scan start (tab mode) ==");
+    logLine("== scan start (tab mode v20) ==");
 
     state.data = [];
     const seen = new Set();
@@ -364,8 +433,8 @@
     });
     logLine("page 1 (current): " + state.data.length);
 
-    const extra = await startScan(maxPages);
-    extra.forEach((d) => {
+    const doneMsg = await startScan(maxPages);
+    (doneMsg.products || []).forEach((d) => {
       if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); }
     });
 
@@ -373,6 +442,10 @@
     hideStopBtn();
     logLine("== done: " + state.data.length + " products ==");
     hideLogLater(15);
+
+    if (doneMsg.stoppedEarly) {
+      toast("⚠️ Myntra porpor khali page dicche (bot block)!\nJa pelam tai sort korlam: " + state.data.length + " products");
+    }
 
     if (!state.data.length) { alert("❌ কোনো product পাইনি!"); return; }
 
@@ -388,7 +461,7 @@
     toast("✅ " + state.data.length + " products sorted!\n🏆 Top: " + fmt(state.data[0].ratings) + " ratings");
   }
 
-  // ─── UI ───
+  // ─── UI ──
   function createPill() {
     if (state.pill) return;
     const pill = document.createElement("div");
@@ -479,7 +552,7 @@
   });
 
   function init() {
-    if (state.isWorker) return; // worker tab e UI banabe na
+    if (state.isWorker) return;
     createPill();
     if (!state.enabled) return;
     const t0 = Date.now();
@@ -491,6 +564,5 @@
     }, 1000);
   }
 
-  // Worker handshake er por init call hobe (async), tai ektu wait
   setTimeout(init, 300);
 })();
