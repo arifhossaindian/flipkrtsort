@@ -1,51 +1,58 @@
 // ============================================
-// SORT BY RATINGS v18 - REAL NAVIGATION COLLECTOR
-// fetch block hole auto page-flip mode (bot-proof)
-// Restore = full reload (100% original page)
+// SORT BY RATINGS v19 - BACKGROUND TAB SCANNER
+// Real background tab e page load kore (bot detect hoy na)
+// Own clean grid, AD last, ON/OFF pill
 // ============================================
 
 (function () {
   "use strict";
-  if (window.__fs18) return;
-  window.__fs18 = 1;
+  if (window.__flipSortLoaded) return;
+  window.__flipSortLoaded = true;
 
   const HOST = location.hostname.replace(/^www\./, "");
-  const IS_F = HOST.indexOf("flipkart.com") !== -1;
-  const IS_M = HOST.indexOf("myntra.com") !== -1;
-  if (!IS_F && !IS_M) return;
+  const IS_FLIPKART = HOST.indexOf("flipkart.com") !== -1;
+  const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
+  if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const SKEY = "fs18_session";
-  const EKEY = "fs18_enabled";
-  const PER_PAGE = IS_F ? 40 : 50;
-  const CARD_W = IS_F ? "25%" : "20%";
-  const PARAM = IS_F ? "page" : "p";
-  const MAX_MEM = 4000000; // ~4MB localStorage safety
+  const LS_KEY = "sortratings_enabled_v19";
+  const CHUNK = 200;
 
-  const state = { sorted: false, startUrl: location.href, btn: null, pill: null };
+  const state = {
+    enabled: localStorage.getItem(LS_KEY) !== "0",
+    isWorker: false,
+    sorted: false,
+    scanning: false,
+    scanId: null,
+    pendingDone: null,
+    data: [],
+    rendered: 0,
+    wrap: null,
+    hiddenEls: [],
+    pill: null, sortBtn: null, stopBtn: null, logBox: null,
+  };
+
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // ─── Session (localStorage) ───
-  function getSess() { try { return JSON.parse(localStorage.getItem(SKEY)) || null; } catch (e) { return null; } }
-  function setSess(s) { try { localStorage.setItem(SKEY, JSON.stringify(s)); return true; } catch (e) { return false; } }
-  function clearSess() { try { localStorage.removeItem(SKEY); } catch (e) {} }
-
-  // ─── Numbers ───
   function parseDigits(t) {
     const d = String(t == null ? "" : t).replace(/[^0-9]/g, "");
     if (!d || d.length > 8) return 0;
     const n = parseInt(d, 10);
     return isFinite(n) && n >= 0 ? n : 0;
   }
-  function parseMy(t) {
+
+  function parseK(t) {
     let s = String(t || "").trim().toLowerCase().replace(/^[^0-9]+/, "");
     const m = s.match(/^([\d.]+)\s*(k|m|l)?/);
     if (!m) return 0;
     let n = parseFloat(m[1]);
     if (!isFinite(n) || n < 0) return 0;
-    if (m[2] === "k") n *= 1000; else if (m[2] === "m") n *= 1000000; else if (m[2] === "l") n *= 100000;
+    if (m[2] === "k") n *= 1000;
+    else if (m[2] === "m") n *= 1000000;
+    else if (m[2] === "l") n *= 100000;
     n = Math.round(n);
     return n <= 99999999 ? n : 0;
   }
+
   function fmt(n) {
     n = +n || 0;
     if (n >= 1000000) return (n / 1000000).toFixed(1) + "M";
@@ -53,342 +60,437 @@
     return String(n);
   }
 
-  // ─── Extract products from any DOM root ───
-  function extract(root) {
-    const out = [];
-    if (IS_F) {
-      root.querySelectorAll("div[data-id]").forEach((el) => {
-        if (el.querySelector("div[data-id]")) return;
-        if (!el.querySelector('a[href*="/p/"]')) return;
-        const t = el.textContent || "";
-        if (t.indexOf("₹") === -1 || !el.querySelector("img")) return;
-        const s = el.querySelector("span.PvbNMB");
-        let r = s ? parseDigits(s.textContent) : 0;
-        if (!r) { const m = t.match(/\(([\d,]+)\)/); r = m ? parseDigits(m[1]) : 0; }
-        out.push({ id: el.getAttribute("data-id"), html: el.outerHTML, ratings: r, sponsored: !!el.querySelector(".IxWX8O") });
-      });
-    } else {
-      root.querySelectorAll("li.product-base").forEach((el) => {
-        const rc = el.querySelector(".product-ratingsContainer");
-        if (!rc) return;
-        const id = el.getAttribute("id");
-        if (!id) return;
-        const cnt = el.querySelector(".product-ratingsCount");
-        const w = el.querySelector(".product-waterMark");
-        out.push({ id, html: el.outerHTML, ratings: cnt ? parseMy(cnt.textContent) : 0, sponsored: w ? /AD/i.test(w.textContent || "") : false });
-      });
-    }
-    return out;
-  }
-
-  function waitForProducts(maxTries) {
-    return new Promise((res) => {
-      let n = 0;
-      const iv = setInterval(() => {
-        n++;
-        if (extract(document).length > 0 || n >= (maxTries || 16)) { clearInterval(iv); res(); }
-      }, 500);
-    });
-  }
-
-  function urlWithPage(base, p) {
-    const b = base.replace(/([?&])(page|p)=\d+&?/g, "$1").replace(/[?&]$/, "").replace(/#.*$/, "");
-    return b + (b.indexOf("?") !== -1 ? "&" : "?") + PARAM + "=" + p;
-  }
-
-  // ─── Toast + Overlay ───
   function toast(msg) {
     let t = document.getElementById("fs-toast");
     if (!t) {
-      t = document.createElement("div"); t.id = "fs-toast";
-      t.style.cssText = "position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#212121;color:#fff;padding:12px 22px;border-radius:10px;font:500 13px/1.4 Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4);max-width:80vw;text-align:center;white-space:pre-line;transition:opacity .3s;opacity:0;";
+      t = document.createElement("div");
+      t.id = "fs-toast";
+      t.style.cssText =
+        "position:fixed;top:70px;left:50%;transform:translateX(-50%);z-index:2147483647;" +
+        "background:#212121;color:#fff;padding:12px 22px;border-radius:10px;" +
+        "font:500 13px/1.4 Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.4);" +
+        "max-width:80vw;text-align:center;white-space:pre-line;transition:opacity .3s;opacity:0;";
       document.body.appendChild(t);
     }
-    t.textContent = msg; t.style.opacity = "1";
-    clearTimeout(t._timer); t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
+    t.textContent = msg;
+    t.style.opacity = "1";
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => (t.style.opacity = "0"), 4000);
   }
 
-  function overlay(text) {
-    let o = document.getElementById("fs-overlay");
-    if (!o) {
-      o = document.createElement("div"); o.id = "fs-overlay";
-      o.style.cssText = "position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;background:#0d47a1;color:#fff;padding:14px 26px;border-radius:14px;font:700 14px/1.5 Arial,sans-serif;box-shadow:0 6px 20px rgba(0,0,0,.45);text-align:center;white-space:pre-line;";
-      document.body.appendChild(o);
+  function logLine(msg) {
+    if (!state.logBox) {
+      state.logBox = document.createElement("div");
+      state.logBox.style.cssText =
+        "position:fixed;left:12px;bottom:12px;z-index:2147483647;width:300px;max-height:220px;" +
+        "overflow:auto;background:rgba(10,10,10,.92);color:#7CFC00;font:11px/1.5 monospace;" +
+        "padding:10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);";
+      document.body.appendChild(state.logBox);
     }
-    o.textContent = text;
-    return o;
+    const line = document.createElement("div");
+    line.textContent = msg;
+    state.logBox.appendChild(line);
+    state.logBox.scrollTop = state.logBox.scrollHeight;
+  }
+  function hideLogLater(sec) {
+    setTimeout(() => {
+      if (state.logBox) { state.logBox.remove(); state.logBox = null; }
+    }, sec * 1000);
   }
 
-  // ─── Hide originals + render sorted grid ───
-  function renderSorted(prods) {
-    if (!prods || !prods.length) return false;
+  // ─── Card data ───
+  function cardData(el) {
+    if (IS_MYNTRA) {
+      const id = el.getAttribute("id") || "";
+      const a = el.querySelector("a[href]");
+      let href = "";
+      try { href = a ? new URL(a.getAttribute("href"), location.origin).href : ""; } catch (e) {}
+      const img = el.querySelector("img");
+      const rc = el.querySelector(".product-ratingsCount");
+      let ratings = rc ? parseK(rc.textContent) : 0;
+      if (!ratings) {
+        const m = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
+        if (m) ratings = parseK(m[1]);
+      }
+      const w = el.querySelector(".product-waterMark");
+      return {
+        id, href,
+        img: img ? (img.src || img.getAttribute("data-src") || "") : "",
+        brand: (el.querySelector(".product-brand") || {}).textContent || "",
+        name: (el.querySelector(".product-product") || {}).textContent || "",
+        price: ((el.querySelector(".product-discountedPrice") || {}).textContent || "").trim(),
+        ratings,
+        sponsored: w ? /AD/i.test(w.textContent || "") : false,
+      };
+    }
+    const id = el.getAttribute("data-id") || "";
+    const a = el.querySelector('a[href*="/p/"]');
+    const img = el.querySelector("img");
+    const s = el.querySelector("span.PvbNMB");
+    let ratings = s ? parseDigits(s.textContent) : 0;
+    if (!ratings) {
+      const m = (el.textContent || "").match(/\(([\d,]+)\)/);
+      if (m) ratings = parseDigits(m[1]);
+    }
+    const pm = (el.textContent || "").match(/₹[\d,]+/);
+    return {
+      id,
+      href: a ? a.href : "",
+      img: img ? (img.src || img.getAttribute("data-src") || "") : "",
+      brand: "",
+      name: (el.querySelector("a[title]") || {}).title || "",
+      price: pm ? pm[0] : "",
+      ratings,
+      sponsored: !!el.querySelector(".IxWX8O"),
+    };
+  }
 
-    prods.sort((a, b) => {
+  function productEls(doc) {
+    if (IS_MYNTRA) {
+      return Array.from(doc.querySelectorAll("li.product-base"));
+    }
+    return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
+      if (el.querySelector("div[data-id]")) return false;
+      if (!el.querySelector('a[href*="/p/"]')) return false;
+      return (el.textContent || "").indexOf("₹") !== -1 && !!el.querySelector("img");
+    });
+  }
+
+  function extractLive() {
+    return productEls(document).map(cardData);
+  }
+
+  // ─── WORKER MODE (background tab hole) ───
+  try {
+    chrome.runtime.sendMessage({ type: "FS_WORKER_READY" }, (resp) => {
+      if (chrome.runtime.lastError) return;
+      if (!resp || !resp.isWorker) return;
+      state.isWorker = true;
+      (async () => {
+        const t0 = Date.now();
+        let els = [];
+        while (Date.now() - t0 < 15000) {
+          els = productEls(document);
+          if (els.length) break;
+          await sleep(500);
+        }
+        await sleep(1000);
+        els = productEls(document);
+        try {
+          chrome.runtime.sendMessage({
+            type: "FS_WORKER_DONE",
+            scanId: resp.scanId,
+            products: els.map(cardData),
+          });
+        } catch (e) {}
+      })();
+    });
+  } catch (e) {}
+
+  // ─── MAIN TAB listener ───
+  try {
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (msg.type === "FS_PROGRESS" && msg.scanId === state.scanId) {
+        logLine("pages " + msg.done + "/" + msg.total + " • collected " + msg.collected);
+        toast("🔍 Pages " + msg.done + "/" + msg.total + "\n📦 Collected: " + msg.collected);
+      }
+      if (msg.type === "FS_SCAN_DONE" && msg.scanId === state.scanId && state.pendingDone) {
+        const cb = state.pendingDone;
+        state.pendingDone = null;
+        cb(msg.products || []);
+      }
+      if (sendResponse) sendResponse({ ok: true });
+      return false;
+    });
+  } catch (e) {}
+
+  function startScan(maxPages) {
+    return new Promise((resolve) => {
+      const base = location.href.replace(/([?&])(page|p)=\d+&?/g, "$1").replace(/[?&]$/, "");
+      const sep = base.indexOf("?") !== -1 ? "&" : "?";
+      const param = IS_FLIPKART ? "page" : "p";
+      const urls = [];
+      for (let p = 2; p <= maxPages; p++) urls.push(base + sep + param + "=" + p);
+      if (!urls.length) { resolve([]); return; }
+      state.scanId = "S" + Date.now();
+      state.pendingDone = resolve;
+      chrome.runtime.sendMessage({ type: "FS_SCAN_START", scanId: state.scanId, urls }, () => {
+        if (chrome.runtime.lastError) {
+          state.pendingDone = null;
+          resolve([]);
+        }
+      });
+    });
+  }
+
+  // ─── Own grid render ───
+  function injectCSS() {
+    if (document.getElementById("fs-css")) return;
+    const s = document.createElement("style");
+    s.id = "fs-css";
+    s.textContent =
+      ".fs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;padding:14px;background:#fff;}" +
+      ".fs-card{position:relative;display:block;background:#fff;border:1px solid #eaeaec;border-radius:6px;overflow:hidden;text-decoration:none;color:#282c3f;}" +
+      ".fs-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.15);}" +
+      ".fs-card img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#f5f5f6;}" +
+      ".fs-rate{position:absolute;top:6px;left:6px;background:rgba(255,255,255,.95);color:#282c3f;font:700 11px/1 Arial;padding:5px 7px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.2);}" +
+      ".fs-ad{position:absolute;top:6px;right:6px;background:#9e9e9e;color:#fff;font:700 10px/1 Arial;padding:4px 6px;border-radius:4px;}" +
+      ".fs-info{padding:8px 10px 12px;font:12px/1.35 Arial,sans-serif;}" +
+      ".fs-brand{font-weight:700;margin-bottom:2px;}" +
+      ".fs-name{color:#535766;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}" +
+      ".fs-price{font-weight:700;margin-top:6px;}" +
+      ".fs-bar{background:#fff;border-bottom:1px solid #eaeaec;padding:10px 14px;font:600 14px Arial;}" +
+      ".fs-more{display:block;margin:16px auto;padding:12px 30px;background:#2874f0;color:#fff;border:none;border-radius:22px;font:600 14px Arial;cursor:pointer;}";
+    document.head.appendChild(s);
+  }
+
+  function cardEl(d) {
+    const a = document.createElement("a");
+    a.className = "fs-card";
+    a.href = d.href || "#";
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.innerHTML =
+      '<img loading="lazy" src="' + (d.img || "") + '" alt="">' +
+      '<div class="fs-rate">⭐ ' + fmt(d.ratings) + "</div>" +
+      (d.sponsored ? '<div class="fs-ad">AD</div>' : "") +
+      '<div class="fs-info">' +
+      (d.brand ? '<div class="fs-brand"></div>' : "") +
+      '<div class="fs-name"></div>' +
+      (d.price ? '<div class="fs-price"></div>' : "") +
+      "</div>";
+    const q = (s) => a.querySelector(s);
+    if (d.brand) q(".fs-brand").textContent = d.brand.trim();
+    q(".fs-name").textContent = (d.name || "").trim();
+    if (d.price) q(".fs-price").textContent = d.price;
+    return a;
+  }
+
+  function render() {
+    injectCSS();
+    state.hiddenEls = [];
+    let anchor = null;
+    if (IS_MYNTRA) {
+      anchor = document.getElementById("desktopSearchResults");
+      if (!anchor) {
+        const ul = document.querySelector("ul.results-base");
+        anchor = ul ? ul.parentElement : null;
+      }
+      if (anchor) { anchor.style.display = "none"; state.hiddenEls.push(anchor); }
+    } else {
+      const rows = Array.from(document.querySelectorAll("div.nZIRY7"))
+        .filter((r) => r.querySelector('div[data-id] a[href*="/p/"]'));
+      const secs = [];
+      rows.forEach((r) => {
+        const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
+        if (s && secs.indexOf(s) === -1) secs.push(s);
+      });
+      secs.forEach((s) => { s.style.display = "none"; state.hiddenEls.push(s); });
+      anchor = secs[0] || null;
+    }
+
+    const wrap = document.createElement("div");
+    wrap.id = "fs-wrap";
+    const bar = document.createElement("div");
+    bar.className = "fs-bar";
+    const ads = state.data.filter((d) => d.sponsored).length;
+    bar.textContent = "⭐ Sorted by most rated — " + state.data.length + " products (" + ads + " AD last e)";
+    wrap.appendChild(bar);
+    const grid = document.createElement("div");
+    grid.className = "fs-grid";
+    wrap.appendChild(grid);
+
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(wrap, anchor);
+    else document.body.appendChild(wrap);
+    state.wrap = wrap;
+    state.rendered = 0;
+    appendChunk();
+  }
+
+  function appendChunk() {
+    const grid = state.wrap.querySelector(".fs-grid");
+    const end = Math.min(state.rendered + CHUNK, state.data.length);
+    const frag = document.createDocumentFragment();
+    for (let i = state.rendered; i < end; i++) frag.appendChild(cardEl(state.data[i]));
+    state.rendered = end;
+    const old = state.wrap.querySelector(".fs-more");
+    if (old) old.remove();
+    grid.appendChild(frag);
+    if (state.rendered < state.data.length) {
+      const b = document.createElement("button");
+      b.className = "fs-more";
+      b.textContent = "⬇️ Load more (" + state.rendered + "/" + state.data.length + ")";
+      b.onclick = appendChunk;
+      state.wrap.appendChild(b);
+    }
+  }
+
+  function restore(silent) {
+    if (state.wrap) { state.wrap.remove(); state.wrap = null; }
+    state.hiddenEls.forEach((el) => { if (el.isConnected) el.style.display = ""; });
+    state.hiddenEls = [];
+    state.data = [];
+    state.rendered = 0;
+    state.sorted = false;
+    updateSortBtn();
+    if (!silent) toast("🔄 Original page restored!");
+  }
+
+  // ─── Main sort ───
+  async function sortByRatings() {
+    if (!state.enabled || state.scanning) return;
+    if (state.sorted) { restore(false); return; }
+
+    const per = IS_FLIPKART ? 40 : 50;
+    const input = prompt(
+      (IS_FLIPKART ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n" +
+      "(প্রতি page = " + per + " products)\n\n" +
+      "5 = " + per * 5 + " | 20 = " + per * 20 + " | 100 = " + per * 100 + "\n\n" +
+      "Scan এর সময় background tab khulbe-bandho hobe (normal, click korো না)",
+      "5"
+    );
+    if (input === null) return;
+    const maxPages = parseInt(input.trim(), 10);
+    if (!maxPages || maxPages < 1) { alert("❌ সঠিক সংখ্যা দাও!"); return; }
+
+    state.scanning = true;
+    showStopBtn();
+    logLine("== scan start (tab mode) ==");
+
+    state.data = [];
+    const seen = new Set();
+    extractLive().forEach((d) => {
+      if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); }
+    });
+    logLine("page 1 (current): " + state.data.length);
+
+    const extra = await startScan(maxPages);
+    extra.forEach((d) => {
+      if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); }
+    });
+
+    state.scanning = false;
+    hideStopBtn();
+    logLine("== done: " + state.data.length + " products ==");
+    hideLogLater(15);
+
+    if (!state.data.length) { alert("❌ কোনো product পাইনি!"); return; }
+
+    state.data.sort((a, b) => {
       if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
       return b.ratings - a.ratings;
     });
 
-    // Hide native results + pagination
-    const hides = [];
-    if (IS_F) {
-      document.querySelectorAll("div.nZIRY7").forEach((r) => {
-        if (!r.querySelector('div[data-id] a[href*="/p/"]')) return;
-        const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
-        if (s && hides.indexOf(s) === -1) hides.push(s);
-      });
-    } else {
-      const ul = document.querySelector("ul.results-base");
-      if (ul) {
-        const s = ul.parentElement || ul;
-        hides.push(s);
-      }
-    }
-    document.querySelectorAll("div, nav").forEach((d) => {
-      if (/Page\s+\d+\s+of\s+\d+/i.test(d.textContent || "") && d.querySelector("nav, a") && d.children.length < 8) hides.push(d);
-    });
-    hides.forEach((s) => { if (s && !s.getAttribute("data-fshide")) { s.setAttribute("data-fshide", "1"); s.style.display = "none"; } });
-
-    // Our grid
-    const grid = document.createElement("div");
-    grid.id = "fs-grid";
-    grid.style.cssText = "display:flex;flex-wrap:wrap;width:100%;background:#fff;";
-    prods.forEach((p, rank) => {
-      const wrap = document.createElement("div");
-      wrap.style.cssText = "width:" + CARD_W + ";box-sizing:border-box;position:relative;";
-      const tpl = document.createElement("template");
-      tpl.innerHTML = p.html.trim();
-      const card = tpl.content.firstElementChild;
-      if (!card) return;
-      card.style.cssText = (card.getAttribute("style") || "") + ";width:100%;display:block;position:relative;list-style:none;";
-      const b = document.createElement("div");
-      b.style.cssText = "position:absolute;top:8px;right:14px;z-index:9;color:#fff;font:700 12px/1 Arial,sans-serif;padding:5px 9px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.3);pointer-events:none;background:" + (p.sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
-      b.textContent = p.sponsored ? "📢 AD" : "⭐ " + fmt(p.ratings);
-      b.title = "Ratings: " + p.ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
-      wrap.appendChild(card);
-      wrap.appendChild(b);
-      grid.appendChild(wrap);
-    });
-
-    const info = document.createElement("div");
-    info.style.cssText = "padding:14px 18px;font:600 14px Arial,sans-serif;color:#333;background:#fff;border-bottom:1px solid #eee;";
-    const ads = prods.filter((p) => p.sponsored).length;
-    info.textContent = "⭐ Sorted " + prods.length + " products by ratings (most → least) | 📢 AD: " + ads + " (last e) | 🔄 Restore = button niche";
-    
-    const box = document.createElement("div");
-    box.id = "fs-resultbox";
-    box.appendChild(info);
-    box.appendChild(grid);
-
-    const anchor = hides[0];
-    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(box, anchor);
-    else document.body.appendChild(box);
-
+    render();
     state.sorted = true;
-    updateBtn();
+    updateSortBtn();
     window.scrollTo({ top: 0, behavior: "smooth" });
-    toast("✅ " + prods.length + " products sorted!\n🏆 Top: " + fmt(prods[0].ratings) + " ratings");
-    return true;
-  }
-
-  function unhide() {
-    document.querySelectorAll("[data-fshide]").forEach((s) => { s.style.display = ""; s.removeAttribute("data-fshide"); });
-    const b = document.getElementById("fs-resultbox");
-    if (b) b.remove();
-  }
-
-  // ─── NAV MODE (page flip collector) ───
-  async function navStep() {
-    const ses = getSess();
-    if (!ses || !ses.nav) return false;
-
-    await waitForProducts(16);
-    const cur = extract(document);
-    const seen = {};
-    ses.collected.forEach((c) => { seen[c.id] = 1; });
-    let fresh = 0;
-    cur.forEach((c) => { if (!seen[c.id]) { seen[c.id] = 1; ses.collected.push(c); fresh++; } });
-
-    const o = overlay(
-      "📦 Page " + ses.cur + "/" + ses.pages + " theke collect hocche\n" +
-      " Total: " + ses.collected.length + " products (+" + fresh + ")\n" +
-      "⏳ Kichu korben na... auto cholche"
-    );
-    const stop = document.createElement("div");
-    stop.textContent = "🛑 STOP EKHONE";
-    stop.style.cssText = "margin-top:8px;background:#d32f2f;border-radius:8px;padding:6px 12px;cursor:pointer;font:700 12px Arial;";
-    stop.onclick = () => { ses.stop = true; setSess(ses); };
-    o.appendChild(stop);
-
-    const tooBig = JSON.stringify(ses.collected).length > MAX_MEM;
-    if (!setSess(ses)) ses.stop = true;
-
-    await sleep(1000);
-
-    if (ses.stop || tooBig || ses.cur > ses.pages) {
-      ses.nav = false; ses.render = true; setSess(ses);
-      overlay("✅ Collect sesh! Page 1 e firchi...");
-      setTimeout(() => { location.href = ses.start.replace(/#.*$/, ""); }, 900);
-    } else {
-      const next = ses.cur;
-      ses.cur = ses.cur + 1; setSess(ses);
-      setTimeout(() => { location.href = urlWithPage(ses.start, next); }, 600);
-    }
-    return true;
-  }
-
-  // ─── FETCH MODE (fast, jodi site allow kore) ───
-  async function fetchCollect(startUrl, pages, initial) {
-    const seen = {};
-    const collected = initial.slice();
-    collected.forEach((c) => { seen[c.id] = 1; });
-    let consecutiveFail = 0;
-
-    for (let p = 2; p <= pages; p++) {
-      toast("🔍 Page " + p + "/" + pages + " (fetch)...\n📦 Total: " + collected.length);
-      let prods = [];
-      try {
-        const res = await fetch(urlWithPage(startUrl, p), { credentials: "include" });
-        if (res.ok) {
-          const doc = new DOMParser().parseFromString(await res.text(), "text/html");
-          prods = extract(doc);
-        }
-      } catch (e) {}
-      let fresh = 0;
-      prods.forEach((c) => { if (c.id && !seen[c.id]) { seen[c.id] = 1; collected.push(c); fresh++; } });
-      if (!prods.length || !fresh) { consecutiveFail++; if (consecutiveFail >= 2) return { collected, blocked: true, atPage: p }; }
-      else consecutiveFail = 0;
-      if (JSON.stringify(collected).length > MAX_MEM) return { collected, blocked: false, atPage: p, memFull: true };
-      await sleep(900);
-    }
-    return { collected, blocked: false, atPage: pages + 1 };
-  }
-
-  // ─── Main click ───
-  async function onSort() {
-    if (state.sorted) {
-      clearSess();
-      location.href = state.startUrl.replace(/#.*$/, "");
-      return;
-    }
-
-    const input = prompt(
-      (IS_F ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n\n" +
-      "প্রতি page = " + PER_PAGE + " products\n" +
-      "10 page = " + PER_PAGE * 10 + " | 20 page = " + PER_PAGE * 20 + "\n" +
-      "(memory limit: max 30 page)\n\nসংখ্যা লেখো:",
-      "10"
-    );
-    if (input === null) return;
-    let pages = parseInt(input.trim(), 10);
-    if (!pages || pages < 1) pages = 1;
-    if (pages > 30) pages = 30;
-
-    const startUrl = location.href.replace(/#.*$/, "");
-    state.startUrl = startUrl;
-
-    await waitForProducts(10);
-    const initial = extract(document);
-    if (!initial.length) { alert("❌ Product পাওয়া যায়নি! Page refresh করো।"); return; }
-
-    if (pages === 1) {
-      renderSorted(initial);
-      return;
-    }
-
-    const res = await fetchCollect(startUrl, pages, initial);
-
-    if (!res.blocked) {
-      renderSorted(res.collected);
-      if (res.memFull) toast("⚠️ Memory full — " + res.collected.length + " product পর্যন্ত হয়েছে");
-      return;
-    }
-
-    // Fetch blocked → real navigation mode
-    const ok = confirm(
-      "Site fetch block করছে!\n\n" +
-      "এখন BROWSER AUTO PAGE-FLIP mode চলবে:\n" +
-      "• নিজে নিজে page " + res.atPage + " → " + pages + " পর্যন্ত যাবে\n" +
-      "• ১- মিনিট লাগবে, কিছু click কোরো না\n" +
-      "• শেষে page 1 এ ফিরে sort দেখাবে\n\n" +
-      "OK = শুরু করো | Cancel = যা পেয়েছি তাই sort করো"
-    );
-    if (!ok) { renderSorted(res.collected); return; }
-
-    setSess({ nav: true, render: false, stop: false, start: startUrl, pages: pages, cur: res.atPage, collected: res.collected });
-    location.href = urlWithPage(startUrl, res.atPage);
+    toast("✅ " + state.data.length + " products sorted!\n🏆 Top: " + fmt(state.data[0].ratings) + " ratings");
   }
 
   // ─── UI ───
-  function createBtn() {
-    if (state.btn) return;
-    const b = document.createElement("div");
-    b.style.cssText = "position:fixed;right:26px;bottom:30px;z-index:2147483647;cursor:pointer;user-select:none;color:#fff;border-radius:30px;padding:13px 22px;font:700 14px Arial,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.35);";
-    b.addEventListener("click", onSort);
-    document.body.appendChild(b);
-    state.btn = b;
-    updateBtn();
-  }
-  function updateBtn() {
-    if (!state.btn) return;
-    if (state.sorted) {
-      state.btn.textContent = "🔄 Restore Default (reload)";
-      state.btn.style.background = "linear-gradient(135deg,#2e7d32,#1b5e20)";
-    } else {
-      state.btn.textContent = "⭐ Sort by Ratings";
-      state.btn.style.background = "linear-gradient(135deg,#2874f0,#1a4fb7)";
-    }
-  }
   function createPill() {
     if (state.pill) return;
     const pill = document.createElement("div");
-    pill.style.cssText = "position:fixed;top:64px;right:14px;z-index:2147483647;cursor:pointer;user-select:none;padding:8px 14px;border-radius:20px;font:700 12px Arial,sans-serif;color:#fff;box-shadow:0 3px 10px rgba(0,0,0,.3);";
-    pill.onclick = () => {
-      const on = localStorage.getItem(EKEY) !== "1";
-      localStorage.setItem(EKEY, on ? "1" : "0");
-      if (!on) { clearSess(); location.href = location.href.replace(/#.*$/, ""); }
-      else location.reload();
-    };
+    pill.style.cssText =
+      "position:fixed;top:64px;right:14px;z-index:2147483647;cursor:pointer;user-select:none;" +
+      "padding:8px 14px;border-radius:20px;font:700 12px Arial,sans-serif;color:#fff;" +
+      "box-shadow:0 3px 10px rgba(0,0,0,.3);";
+    pill.onclick = () => setEnabled(!state.enabled);
     document.body.appendChild(pill);
     state.pill = pill;
-    const on = localStorage.getItem(EKEY) !== "0";
-    pill.textContent = on ? "🟢 Sort ON" : "🔴 Sort OFF";
-    pill.style.background = on ? "linear-gradient(135deg,#2e7d32,#1b5e20)" : "linear-gradient(135deg,#c62828,#8e0000)";
-    if (!on) { state.pill = pill; return; }
+    updatePill();
+  }
+  function updatePill() {
+    if (!state.pill) return;
+    if (state.enabled) {
+      state.pill.textContent = "🟢 Sort ON";
+      state.pill.style.background = "linear-gradient(135deg,#2e7d32,#1b5e20)";
+    } else {
+      state.pill.textContent = "🔴 Sort OFF";
+      state.pill.style.background = "linear-gradient(135deg,#c62828,#8e0000)";
+    }
+  }
+  function setEnabled(on) {
+    state.enabled = on;
+    try { localStorage.setItem(LS_KEY, on ? "1" : "0"); } catch (e) {}
+    if (!on) {
+      if (state.sorted) restore(true);
+      if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
+      hideStopBtn();
+      toast("🔴 OFF");
+    } else { createSortButton(); toast("🟢 ON"); }
+    updatePill();
+  }
+  function createSortButton() {
+    if (state.sortBtn || !state.enabled) return;
+    const b = document.createElement("div");
+    b.style.cssText =
+      "position:fixed;right:26px;bottom:30px;z-index:2147483647;cursor:pointer;user-select:none;" +
+      "color:#fff;border-radius:30px;padding:13px 22px;font:700 14px Arial,sans-serif;" +
+      "box-shadow:0 4px 16px rgba(0,0,0,.35);";
+    b.addEventListener("click", sortByRatings);
+    document.body.appendChild(b);
+    state.sortBtn = b;
+    updateSortBtn();
+  }
+  function updateSortBtn() {
+    if (!state.sortBtn) return;
+    if (state.sorted) {
+      state.sortBtn.textContent = "🔄 Restore Default";
+      state.sortBtn.style.background = "linear-gradient(135deg,#2e7d32,#1b5e20)";
+    } else {
+      state.sortBtn.textContent = "⭐ Sort by Ratings";
+      state.sortBtn.style.background = "linear-gradient(135deg,#2874f0,#1a4fb7)";
+    }
+  }
+  function showStopBtn() {
+    if (state.stopBtn) return;
+    const s = document.createElement("div");
+    s.textContent = "🛑 STOP";
+    s.style.cssText =
+      "position:fixed;right:26px;bottom:88px;z-index:2147483647;cursor:pointer;background:#d32f2f;" +
+      "color:#fff;border-radius:20px;padding:9px 18px;font:700 13px Arial,sans-serif;";
+    s.onclick = () => {
+      try { chrome.runtime.sendMessage({ type: "FS_SCAN_ABORT", scanId: state.scanId }); } catch (e) {}
+    };
+    document.body.appendChild(s);
+    state.stopBtn = s;
+  }
+  function hideStopBtn() {
+    if (state.stopBtn) { state.stopBtn.remove(); state.stopBtn = null; }
   }
 
-  // ─── Boot ───
-  (async function boot() {
-    // NAV mode?
-    const ses = getSess();
-    if (ses && ses.nav) { await navStep(); return; }
-    if (ses && ses.render) {
-      const prods = ses.collected || [];
-      clearSess();
-      createPill();
-      if (localStorage.getItem(EKEY) === "0") return;
-      await waitForProducts(10);
-      if (renderSorted(prods)) { createBtn(); }
-      return;
-    }
-    createPill();
-    if (localStorage.getItem(EKEY) === "0") return;
-    const t0 = Date.now();
-    const iv = setInterval(() => {
-      if (extract(document).length > 0 || Date.now() - t0 > 20000) { clearInterval(iv); createBtn(); }
-    }, 1000);
+  (function watchURL() {
+    let last = location.href;
+    new MutationObserver(() => {
+      if (location.href !== last) {
+        last = location.href;
+        if (!state.isWorker && (state.sorted || state.wrap)) restore(true);
+      }
+    }).observe(document.body, { childList: true, subtree: true });
   })();
 
-  // SPA change e clean
-  let lastUrl = location.href;
-  new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      const s = getSess();
-      if (!s || !s.nav) { unhide(); state.sorted = false; updateBtn(); }
-    }
-  }).observe(document.body, { childList: true, subtree: true });
-
   document.addEventListener("keydown", (e) => {
-    if (e.altKey && e.key.toLowerCase() === "s") { e.preventDefault(); onSort(); }
+    if (e.altKey && e.key.toLowerCase() === "s") {
+      e.preventDefault();
+      if (state.enabled && !state.isWorker) sortByRatings();
+    }
   });
+
+  function init() {
+    if (state.isWorker) return; // worker tab e UI banabe na
+    createPill();
+    if (!state.enabled) return;
+    const t0 = Date.now();
+    const iv = setInterval(() => {
+      const has = IS_MYNTRA
+        ? document.querySelector("li.product-base")
+        : document.querySelector('div[data-id] a[href*="/p/"]');
+      if (has || Date.now() - t0 > 20000) { clearInterval(iv); createSortButton(); }
+    }, 1000);
+  }
+
+  // Worker handshake er por init call hobe (async), tai ektu wait
+  setTimeout(init, 300);
 })();
