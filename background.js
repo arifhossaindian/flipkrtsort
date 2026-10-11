@@ -1,6 +1,22 @@
-// background.js v20 - delay + retry + auto-stop soho tab scanner
+// background.js v21 - smart backoff + cooldown resume
 let job = null;
-const TAB_DELAY = 1800;
+const BASE_DELAY = 1800;
+
+function pace() {
+  const extra = Math.min((job ? job.doneCount : 0) * 150, 4000);
+  return BASE_DELAY + extra + Math.floor(Math.random() * 1500);
+}
+
+function note(msg) {
+  if (!job) return;
+  chrome.tabs.sendMessage(job.requester, {
+    type: "FS_PROGRESS", scanId: job.scanId,
+    done: job.doneCount, total: job.total,
+    collected: job.results.length, note: msg || null,
+  }, () => { void chrome.runtime.lastError; });
+}
+
+function progress() { note(null); }
 
 function finishJob(stoppedEarly) {
   if (!job) return;
@@ -11,32 +27,62 @@ function finishJob(stoppedEarly) {
   }, () => { void chrome.runtime.lastError; });
 }
 
-function progress() {
-  if (!job) return;
-  chrome.tabs.sendMessage(job.requester, {
-    type: "FS_PROGRESS", scanId: job.scanId,
-    done: job.doneCount, total: job.total, collected: job.results.length,
-  }, () => { if (chrome.runtime.lastError) { finishJob(false); } });
-}
-
 function openNext() {
   if (!job) return;
   if (!job.urls.length) { finishJob(false); return; }
   const url = job.urls.shift();
   job.currentUrl = url;
   chrome.tabs.create({ url: url, active: false }, (tab) => {
-    if (chrome.runtime.lastError || !tab || !job) { setTimeout(openNext, 800); return; }
+    if (chrome.runtime.lastError || !tab || !job) { setTimeout(openNext, 1000); return; }
     job.activeTab = tab.id;
     job.tabTimer = setTimeout(() => {
       if (job && job.activeTab === tab.id) {
         job.activeTab = null;
         chrome.tabs.remove(tab.id, () => { void chrome.runtime.lastError; });
-        job.doneCount++;
-        progress();
-        setTimeout(openNext, TAB_DELAY);
+        handleEmpty(false, false); // timeout = khali dhora hobe
       }
     }, 30000);
   });
+}
+
+function handleEmpty(blocked, noResults) {
+  if (!job) return;
+  const url = job.currentUrl;
+
+  // Sotti last page → normal finish
+  if (noResults) { job.doneCount++; progress(); finishJob(false); return; }
+
+  job.urlRetries = job.urlRetries || {};
+  const attempt = job.urlRetries[url] || 0;
+
+  // 🔁 0 products → wait kore retry (3 bar)
+  if (attempt < 3) {
+    job.urlRetries[url] = attempt + 1;
+    const delays = [8000, 20000, 45000];
+    const d = delays[attempt] + (blocked ? 15000 : 0);
+    note("⏳ 0 products — retry " + (attempt + 1) + "/3 after " + Math.round(d / 1000) + "s");
+    job.urls.unshift(url);
+    setTimeout(openNext, d);
+    return;
+  }
+
+  // Retry sesh → empty streak count
+  job.doneCount++;
+  job.emptyStreak++;
+
+  // 😴 60s BREAK → abar start (2 bar break nite parbe)
+  if (job.emptyStreak === 1 && job.cooldowns < 2) {
+    job.cooldowns++;
+    note("😴 Site block korche — 60s BREAK, tarpor abar start hobe");
+    setTimeout(openNext, 60000);
+    return;
+  }
+
+  // 3 consecutive dead page → thami
+  if (job.emptyStreak >= 3) { progress(); finishJob(true); return; }
+
+  progress();
+  setTimeout(openNext, pace());
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -59,7 +105,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       currentUrl: null,
       tabTimer: null,
       emptyStreak: 0,
-      retried: {},
+      cooldowns: 0,
+      urlRetries: {},
     };
     openNext();
     sendResponse({ ok: true });
@@ -70,37 +117,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (job && msg.scanId === job.scanId && sender.tab && sender.tab.id === job.activeTab) {
       clearTimeout(job.tabTimer);
       const prods = msg.products || [];
-      const url = job.currentUrl;
       job.activeTab = null;
       chrome.tabs.remove(sender.tab.id, () => { void chrome.runtime.lastError; });
 
-      if (prods.length === 0 && !job.retried[url] && job.emptyStreak < 2) {
-        // Khali page → ekbar retry koro (delay soho)
-        job.retried[url] = 1;
-        job.urls.unshift(url);
-        setTimeout(openNext, TAB_DELAY + 2500);
-        sendResponse({ ok: true });
-        return false;
-      }
-
-      job.doneCount++;
-      if (prods.length === 0) {
-        job.emptyStreak++;
-      } else {
+      if (prods.length) {
+        job.doneCount++;
         job.emptyStreak = 0;
         job.results = job.results.concat(prods);
-      }
-
-      // Porpor 3 khali page = site block korche → thambo
-      if (job.emptyStreak >= 3) {
         progress();
-        finishJob(true);
-        sendResponse({ ok: true });
-        return false;
+        setTimeout(openNext, pace());
+      } else {
+        handleEmpty(!!msg.blocked, !!msg.noResults);
       }
-
-      progress();
-      setTimeout(openNext, TAB_DELAY + (prods.length === 0 ? 2500 : 0));
     }
     sendResponse({ ok: true });
     return false;
