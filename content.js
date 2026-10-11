@@ -1,7 +1,7 @@
 // ============================================
-// SORT BY RATINGS v15 - DOM NODE MOVE STRATEGY
-// Myntra: auto-scroll → collect all → sort → move nodes
-// Flipkart: fetch pages → collect all → sort → move nodes
+// SORT BY RATINGS v16 - MULTI-PAGE SCAN
+// User manually page number input করবে
+// সব page fetch → collect → sort → rearrange
 // ============================================
 
 (function () {
@@ -14,7 +14,7 @@
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
   if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const LS_KEY = "sortratings_enabled_v15";
+  const LS_KEY = "sortratings_enabled_v16";
 
   const state = {
     enabled: localStorage.getItem(LS_KEY) !== "0",
@@ -23,6 +23,7 @@
     stop: false,
     originalOrder: [],
     sortedData: [],
+    allProducts: [],
     pill: null,
     sortBtn: null,
     stopBtn: null,
@@ -79,8 +80,8 @@
     t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
   }
 
-  // ─── Get products (DOM nodes) ───
-  function getProducts() {
+  // ─── Get products from DOM ───
+  function getProductsFromDOM() {
     if (IS_FLIPKART) {
       return Array.from(document.querySelectorAll("div[data-id]")).filter((el) => {
         if (el.querySelector("div[data-id]")) return false;
@@ -123,134 +124,140 @@
     }
   }
 
-  // ─── Load all products (Myntra: auto-scroll) ───
-  async function loadAllMyntra() {
-    state.scanning = true;
-    state.stop = false;
-    showStopBtn();
+  // ─── Extract products from HTML string ───
+  function extractFromHTML(html) {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(html, "text/html");
+    const products = [];
 
-    let lastCount = 0;
-    let stableCount = 0;
-    let scrollAttempts = 0;
-    const maxAttempts = 1000;
+    if (IS_FLIPKART) {
+      doc.querySelectorAll("div[data-id]").forEach((el) => {
+        if (el.querySelector("div[data-id]")) return;
+        if (!el.querySelector('a[href*="/p/"]')) return;
+        const txt = el.textContent || "";
+        if (txt.indexOf("₹") === -1 || !el.querySelector("img")) return;
 
-    while (scrollAttempts < maxAttempts && !state.stop) {
-      const products = getProducts();
-      const currentCount = products.length;
-
-      toast(`🔄 Loading... ${currentCount} products\nScroll #${scrollAttempts + 1}`);
-
-      if (currentCount === lastCount) {
-        stableCount++;
-        if (stableCount >= 5) {
-          toast(`✅ All loaded! Total: ${currentCount}`);
-          break;
+        const id = el.getAttribute("data-id");
+        const tpl = document.createElement("template");
+        tpl.innerHTML = el.outerHTML.trim();
+        const node = tpl.content.firstElementChild;
+        if (node) {
+          products.push({
+            id,
+            node,
+            ratings: getRatings(node),
+            sponsored: isSponsored(node),
+          });
         }
-      } else {
-        stableCount = 0;
-        lastCount = currentCount;
-      }
-
-      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-      await sleep(2000);
-      scrollAttempts++;
+      });
+    } else {
+      doc.querySelectorAll("li.product-base").forEach((el) => {
+        if (!el.querySelector(".product-ratingsContainer")) return;
+        const id = el.getAttribute("id");
+        const tpl = document.createElement("template");
+        tpl.innerHTML = el.outerHTML.trim();
+        const node = tpl.content.firstElementChild;
+        if (node) {
+          products.push({
+            id,
+            node,
+            ratings: getRatings(node),
+            sponsored: isSponsored(node),
+          });
+        }
+      });
     }
 
-    state.scanning = false;
-    hideStopBtn();
-    return getProducts();
+    return products;
   }
 
-  // ─── Load all products (Flipkart: fetch pages) ───
-  async function loadAllFlipkart() {
+  // ─── Fetch multiple pages and collect all products ───
+  async function fetchAllPages(maxPages) {
     state.scanning = true;
     state.stop = false;
-    showStopBtn();
-
-    const input = prompt(
-      "Flipkart: কতগুলো PAGE scan করবে?\n\n" +
-      "• খালি OK = ALL pages\n" +
-      "• সংখ্যা লেখো (যেমন 50)",
-      ""
-    );
-    if (input === null) {
-      state.scanning = false;
-      hideStopBtn();
-      return [];
-    }
-
-    const maxPages = input.trim() === "" ? Infinity : (parseInt(input, 10) || Infinity);
-    const base = location.href.replace(/([?&])page=\d+&?/g, "$1").replace(/[?&]$/, "");
-    const sep = base.indexOf("?") !== -1 ? "&" : "?";
-
-    const allProducts = [];
+    state.allProducts = [];
     const seenIds = new Set();
 
-    // Current page products
-    getProducts().forEach((el) => {
-      const id = el.getAttribute("data-id");
+    showStopBtn();
+
+    const base = location.href
+      .replace(/([?&])(page|p)=\d+&?/g, "$1")
+      .replace(/[?&]$/, "");
+    const sep = base.indexOf("?") !== -1 ? "&" : "?";
+    const pageParam = IS_FLIPKART ? "page" : "p";
+
+    // First: get current page products
+    const currentProducts = getProductsFromDOM();
+    currentProducts.forEach((el) => {
+      const id = IS_FLIPKART ? el.getAttribute("data-id") : el.getAttribute("id");
       if (id && !seenIds.has(id)) {
         seenIds.add(id);
-        allProducts.push(el);
+        state.allProducts.push({
+          id,
+          node: el,
+          ratings: getRatings(el),
+          sponsored: isSponsored(el),
+        });
       }
     });
 
-    for (let p = 1; p <= maxPages && !state.stop; p++) {
-      toast(`🔍 Page ${p} fetching...\n📦 Collected: ${allProducts.length}`);
+    toast(`📦 Page 1 collected: ${state.allProducts.length} products`);
+
+    // Fetch remaining pages
+    for (let p = 2; p <= maxPages && !state.stop; p++) {
+      toast(`🔍 Fetching page ${p}/${maxPages}...\n📦 Total: ${state.allProducts.length}`);
 
       try {
-        const res = await fetch(base + sep + "page=" + p, { credentials: "include" });
-        if (!res.ok) break;
+        const url = base + sep + pageParam + "=" + p;
+        const res = await fetch(url, { credentials: "include" });
+        if (!res.ok) {
+          toast(`⚠️ Page ${p} failed. Stopping at ${p - 1} pages.`);
+          break;
+        }
 
         const html = await res.text();
-        const doc = new DOMParser().parseFromString(html, "text/html");
-        const cards = doc.querySelectorAll("div[data-id]");
+        const products = extractFromHTML(html);
 
         let fresh = 0;
-        cards.forEach((card) => {
-          if (card.querySelector("div[data-id]")) return;
-          if (!card.querySelector('a[href*="/p/"]')) return;
-          const txt = card.textContent || "";
-          if (txt.indexOf("₹") === -1 || !card.querySelector("img")) return;
-
-          const id = card.getAttribute("data-id");
-          if (id && !seenIds.has(id)) {
-            seenIds.add(id);
-            // Create DOM node from HTML
-            const tpl = document.createElement("template");
-            tpl.innerHTML = card.outerHTML.trim();
-            const node = tpl.content.firstElementChild;
-            if (node) allProducts.push(node);
+        products.forEach((prod) => {
+          if (prod.id && !seenIds.has(prod.id)) {
+            seenIds.add(prod.id);
+            state.allProducts.push(prod);
             fresh++;
           }
         });
 
-        if (!fresh) break;
-        await sleep(600);
+        if (fresh === 0) {
+          toast(`✅ No new products on page ${p}. Stopping.`);
+          break;
+        }
+
+        await sleep(800);
       } catch (e) {
+        toast(`⚠️ Error on page ${p}. Stopping.`);
         break;
       }
     }
 
     state.scanning = false;
     hideStopBtn();
-    return allProducts;
+    return state.allProducts;
   }
 
-  // ─── Sort and rearrange (DOM nodes move) ───
-  function sortProducts(products) {
+  // ─── Sort and rearrange ───
+  function sortAndRearrange(products) {
     if (!products.length) return;
 
     // Extract data
-    const data = products.map((el, idx) => ({
-      el,
+    const data = products.map((prod, idx) => ({
+      node: prod.node,
       idx,
-      ratings: getRatings(el),
-      sponsored: isSponsored(el),
+      ratings: prod.ratings,
+      sponsored: prod.sponsored,
     }));
 
     // Save original order
-    state.originalOrder = products.slice();
+    state.originalOrder = products.map((p) => p.node);
     state.sortedData = data;
 
     // Sort: sponsored last, then by ratings descending
@@ -261,7 +268,7 @@
     });
 
     // Get parent container
-    const parent = products[0].parentElement;
+    const parent = products[0].node.parentElement;
     if (!parent) {
       alert("❌ Parent container not found!");
       return;
@@ -269,12 +276,12 @@
 
     // Add badges
     data.forEach((d, rank) => {
-      addBadge(d.el, d.ratings, rank, d.sponsored);
+      addBadge(d.node, d.ratings, rank, d.sponsored);
     });
 
-    // Re-append in sorted order (DOM nodes move, not copy!)
+    // Re-append in sorted order
     data.forEach((d) => {
-      parent.appendChild(d.el);
+      parent.appendChild(d.node);
     });
 
     state.sorted = true;
@@ -304,20 +311,21 @@
     if (!parent) return;
 
     // Re-append in original order
-    state.originalOrder.forEach((el) => {
-      parent.appendChild(el);
+    state.originalOrder.forEach((node) => {
+      parent.appendChild(node);
     });
 
     state.sorted = false;
     state.originalOrder = [];
     state.sortedData = [];
+    state.allProducts = [];
     updateSortBtn();
     toast("🔄 Original order restored!");
   }
 
   // ─── Add badge ───
-  function addBadge(el, ratings, rank, sponsored) {
-    const old = el.querySelector(".fs-badge");
+  function addBadge(node, ratings, rank, sponsored) {
+    const old = node.querySelector(".fs-badge");
     if (old) old.remove();
 
     const b = document.createElement("div");
@@ -329,8 +337,8 @@
     b.textContent = sponsored ? "📢 AD" : "⭐ " + fmt(ratings);
     b.title = "Ratings: " + ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
 
-    el.style.position = "relative";
-    el.appendChild(b);
+    node.style.position = "relative";
+    node.appendChild(b);
   }
 
   // ─── Main sort ───
@@ -341,26 +349,38 @@
       return;
     }
 
-    let products;
+    const siteName = IS_FLIPKART ? "Flipkart" : "Myntra";
+    const productsPerPage = IS_FLIPKART ? 40 : 50;
 
-    if (IS_MYNTRA) {
-      const confirm = window.confirm(
-        "Myntra: Auto-scroll করে সব products load করবে।\n" +
-        "এতে 5-15 মিনিট লাগতে পারে।\n\n" +
-        "OK = Start loading all products"
-      );
-      if (!confirm) return;
-      products = await loadAllMyntra();
-    } else {
-      products = await loadAllFlipkart();
+    const input = prompt(
+      `${siteName}: কতগুলো PAGE scan করবে?\n\n` +
+      `প্রতি page এ ${productsPerPage} products\n\n` +
+      `Examples:\n` +
+      `• 10 pages = ${productsPerPage * 10} products\n` +
+      `• 50 pages = ${productsPerPage * 50} products\n` +
+      `• 100 pages = ${productsPerPage * 100} products\n\n` +
+      `কত page scan করবে? (number লেখো):`,
+      "10"
+    );
+
+    if (input === null) return;
+
+    const maxPages = parseInt(input.trim(), 10);
+    if (!maxPages || maxPages < 1) {
+      alert("❌ Invalid number! 1 or more দাও।");
+      return;
     }
+
+    toast(`🚀 Scanning ${maxPages} pages... This may take time`);
+
+    const products = await fetchAllPages(maxPages);
 
     if (!products.length) {
       alert("❌ কোনো product collect হয়নি!");
       return;
     }
 
-    sortProducts(products);
+    sortAndRearrange(products);
   }
 
   // ─── ON/OFF pill ───
@@ -479,7 +499,7 @@
     if (!state.enabled) return;
     const t0 = Date.now();
     const iv = setInterval(() => {
-      const has = getProducts().length > 0;
+      const has = getProductsFromDOM().length > 0;
       if (has || Date.now() - t0 > 20000) {
         clearInterval(iv);
         createSortButton();
