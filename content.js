@@ -1,7 +1,7 @@
 // ============================================
-// SORT BY RATINGS v17 - rel=next PAGINATION CRAWL
-// Myntra/Flipkart er official next-page link follow kore
-// Retry + debug logs soho
+// SORT BY RATINGS v18 - OWN GRID RENDER
+// Site layout এ হাত দেয় না → নিজের clean grid বানায়
+// Live log panel: প্রতি page এর status দেখাবে
 // ============================================
 
 (function () {
@@ -14,18 +14,22 @@
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
   if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const LS_KEY = "sortratings_enabled_v17";
+  const LS_KEY = "sortratings_enabled_v18";
+  const CHUNK = 200;
 
   const state = {
     enabled: localStorage.getItem(LS_KEY) !== "0",
     sorted: false,
     scanning: false,
     stop: false,
-    originalOrder: [],
-    allProducts: [],
+    data: [],
+    rendered: 0,
+    wrap: null,
+    hiddenEls: [],
     pill: null,
     sortBtn: null,
     stopBtn: null,
+    logBox: null,
   };
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -37,9 +41,8 @@
     return isFinite(n) && n >= 0 ? n : 0;
   }
 
-  function parseMyntraCount(t) {
-    let s = String(t || "").trim().toLowerCase();
-    s = s.replace(/^[^0-9]+/, "");
+  function parseK(t) {
+    let s = String(t || "").trim().toLowerCase().replace(/^[^0-9]+/, "");
     const m = s.match(/^([\d.]+)\s*(k|m|l)?/);
     if (!m) return 0;
     let n = parseFloat(m[1]);
@@ -48,7 +51,7 @@
     else if (m[2] === "m") n *= 1000000;
     else if (m[2] === "l") n *= 100000;
     n = Math.round(n);
-    return n >= 0 && n <= 99999999 ? n : 0;
+    return n <= 99999999 ? n : 0;
   }
 
   function fmt(n) {
@@ -73,251 +76,310 @@
     t.textContent = msg;
     t.style.opacity = "1";
     clearTimeout(t._timer);
-    t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
+    t._timer = setTimeout(() => (t.style.opacity = "0"), 4000);
   }
 
-  // ─── Products from DOM ───
-  function getProductsFromDOM() {
-    if (IS_FLIPKART) {
-      return Array.from(document.querySelectorAll("div[data-id]")).filter((el) => {
-        if (el.querySelector("div[data-id]")) return false;
-        if (!el.querySelector('a[href*="/p/"]')) return false;
-        const txt = el.textContent || "";
-        return txt.indexOf("₹") !== -1 && !!el.querySelector("img");
-      });
+  // ─── Live log panel ───
+  function logLine(msg) {
+    if (!state.logBox) {
+      state.logBox = document.createElement("div");
+      state.logBox.style.cssText =
+        "position:fixed;left:12px;bottom:12px;z-index:2147483647;width:280px;max-height:200px;" +
+        "overflow:auto;background:rgba(10,10,10,.92);color:#7CFC00;font:11px/1.5 monospace;" +
+        "padding:10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);";
+      document.body.appendChild(state.logBox);
     }
-    return Array.from(document.querySelectorAll("li.product-base")).filter((el) =>
-      !!el.querySelector(".product-ratingsContainer")
-    );
+    const line = document.createElement("div");
+    line.textContent = msg;
+    state.logBox.appendChild(line);
+    state.logBox.scrollTop = state.logBox.scrollHeight;
+  }
+  function hideLogLater(sec) {
+    setTimeout(() => {
+      if (state.logBox) { state.logBox.remove(); state.logBox = null; }
+    }, sec * 1000);
   }
 
-  function getRatings(el) {
-    if (IS_FLIPKART) {
-      const s = el.querySelector("span.PvbNMB");
-      if (s) { const n = parseDigits(s.textContent); if (n > 0) return n; }
+  // ─── Card data extract (lightweight, no outerHTML) ───
+  function cardData(el) {
+    if (IS_MYNTRA) {
+      const id = el.getAttribute("id") || "";
+      const a = el.querySelector("a[href]");
+      let href = "";
+      try { href = a ? new URL(a.getAttribute("href"), location.origin).href : ""; } catch (e) {}
+      const img = el.querySelector("img");
+      const rc = el.querySelector(".product-ratingsCount");
+      let ratings = rc ? parseK(rc.textContent) : 0;
+      if (!ratings) {
+        const m = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
+        if (m) ratings = parseK(m[1]);
+      }
+      const w = el.querySelector(".product-waterMark");
+      return {
+        id,
+        href,
+        img: img ? (img.src || img.getAttribute("data-src") || "") : "",
+        brand: (el.querySelector(".product-brand") || {}).textContent || "",
+        name: (el.querySelector(".product-product") || {}).textContent || "",
+        price: ((el.querySelector(".product-discountedPrice") || {}).textContent || "").trim(),
+        ratings,
+        sponsored: w ? /AD/i.test(w.textContent || "") : false,
+      };
+    }
+    // Flipkart
+    const id = el.getAttribute("data-id") || "";
+    const a = el.querySelector('a[href*="/p/"]');
+    const img = el.querySelector("img");
+    const s = el.querySelector("span.PvbNMB");
+    let ratings = s ? parseDigits(s.textContent) : 0;
+    if (!ratings) {
       const m = (el.textContent || "").match(/\(([\d,]+)\)/);
-      return m ? parseDigits(m[1]) : 0;
+      if (m) ratings = parseDigits(m[1]);
     }
-    const rc = el.querySelector(".product-ratingsCount");
-    return rc ? parseMyntraCount(rc.textContent || "") : 0;
+    const pm = (el.textContent || "").match(/₹[\d,]+/);
+    return {
+      id,
+      href: a ? a.href : "",
+      img: img ? (img.src || img.getAttribute("data-src") || "") : "",
+      brand: "",
+      name: (el.querySelector("a[title]") || {}).title || "",
+      price: pm ? pm[0] : "",
+      ratings,
+      sponsored: !!el.querySelector(".IxWX8O"),
+    };
   }
 
-  function isSponsored(el) {
-    if (IS_FLIPKART) return !!el.querySelector(".IxWX8O");
-    const w = el.querySelector(".product-waterMark");
-    return w ? /AD/i.test(w.textContent || "") : false;
-  }
-
-  // ─── Extract from parsed HTML doc ───
-  function extractFromDoc(doc) {
-    const out = [];
-    const nodes = IS_FLIPKART
-      ? doc.querySelectorAll("div[data-id]")
-      : doc.querySelectorAll("li.product-base");
-
-    nodes.forEach((el) => {
-      if (IS_FLIPKART) {
-        if (el.querySelector("div[data-id]")) return;
-        if (!el.querySelector('a[href*="/p/"]')) return;
-        const txt = el.textContent || "";
-        if (txt.indexOf("₹") === -1 || !el.querySelector("img")) return;
-      } else {
-        if (!el.querySelector(".product-ratingsContainer")) return;
-      }
-      const tpl = document.createElement("template");
-      tpl.innerHTML = el.outerHTML.trim();
-      const node = tpl.content.firstElementChild;
-      if (!node) return;
-      out.push({
-        id: IS_FLIPKART ? el.getAttribute("data-id") : el.getAttribute("id"),
-        node,
-        ratings: getRatings(node),
-        sponsored: isSponsored(node),
-      });
+  function productEls(doc) {
+    if (IS_MYNTRA) {
+      return Array.from(doc.querySelectorAll("li.product-base")).filter((el) =>
+        !!el.querySelector(".product-ratingsContainer") || !!el.querySelector("img")
+      );
+    }
+    return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
+      if (el.querySelector("div[data-id]")) return false;
+      if (!el.querySelector('a[href*="/p/"]')) return false;
+      return (el.textContent || "").indexOf("₹") !== -1 && !!el.querySelector("img");
     });
-    return out;
   }
 
-  // ─── 🔑 Official next-page link khuje ber kora ───
-  function getNextLink(doc) {
-    const l = doc.querySelector('link[rel="next"]');
-    if (!l) return null;
-    const href = l.getAttribute("href");
-    if (!href || href.indexOf("http") !== 0 && href.indexOf("/") !== 0) return null;
-    try { return new URL(href, doc.baseURI || location.href).href; } catch (e) { return null; }
-  }
-
-  // ─── Fetch with retry ───
-  async function fetchPage(url) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const res = await fetch(url, {
-          credentials: "include",
-          redirect: "follow",
-          headers: { Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8" },
-        });
-        if (!res.ok) {
-          console.warn("[SortRatings] HTTP " + res.status + " → " + url);
-          if (attempt === 1) { await sleep(1500); continue; }
-          return null;
-        }
-        return await res.text();
-      } catch (e) {
-        console.warn("[SortRatings] fetch error:", e);
-        if (attempt === 1) { await sleep(1500); continue; }
-        return null;
-      }
-    }
-    return null;
-  }
-
-  // ─── Multi-page collect ───
-  async function fetchAllPages(maxPages) {
+  // ─── Fetch pages with rel=next chain + logs ───
+  async function collect(maxPages) {
     state.scanning = true;
     state.stop = false;
-    state.allProducts = [];
+    state.data = [];
     const seen = new Set();
     showStopBtn();
+    logLine("== scan start ==");
 
-    // Page 1 = current DOM
-    getProductsFromDOM().forEach((el) => {
-      const id = IS_FLIPKART ? el.getAttribute("data-id") : el.getAttribute("id");
-      if (id && !seen.has(id)) {
-        seen.add(id);
-        state.allProducts.push({ id, node: el, ratings: getRatings(el), sponsored: isSponsored(el) });
-      }
+    productEls(document).forEach((el) => {
+      const d = cardData(el);
+      if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); }
     });
-    console.log("[SortRatings] page 1 (current DOM):", state.allProducts.length);
+    logLine("page 1 (current): " + state.data.length);
 
-    // Fallback URL builder
     const base = location.href.replace(/([?&])(page|p)=\d+&?/g, "$1").replace(/[?&]$/, "");
     const sep = base.indexOf("?") !== -1 ? "&" : "?";
     const param = IS_FLIPKART ? "page" : "p";
 
-    let nextUrl = getNextLink(document) || (base + sep + param + "=2");
-    let pageNum = 2;
-    let pagesOk = 0, pagesFail = 0, dupStreak = 0;
+    const nextOf = (doc) => {
+      const l = doc.querySelector('link[rel="next"]');
+      if (!l) return null;
+      try { return new URL(l.getAttribute("href"), doc.baseURI || location.href).href; } catch (e) { return null; }
+    };
 
-    while (nextUrl && pageNum <= maxPages && !state.stop && dupStreak < 2) {
-      toast("🔍 Page " + pageNum + "/" + maxPages + " fetching...\n📦 Total: " + state.allProducts.length);
+    let url = nextOf(document) || base + sep + param + "=2";
+    let pageNum = 2, failStreak = 0;
 
-      const html = await fetchPage(nextUrl);
+    while (url && pageNum <= maxPages && !state.stop && failStreak < 3) {
+      logLine("fetch page " + pageNum + "...");
+      let html = null, status = 0;
+      try {
+        const res = await fetch(url, { credentials: "include", redirect: "follow" });
+        status = res.status;
+        if (res.ok) html = await res.text();
+      } catch (e) { status = -1; }
+
       if (!html) {
-        pagesFail++;
-        nextUrl = base + sep + param + "=" + (pageNum + 1);
+        failStreak++;
+        logLine("page " + pageNum + ": FAIL (HTTP " + status + ")");
+        url = base + sep + param + "=" + (pageNum + 1);
         pageNum++;
+        await sleep(1200);
         continue;
       }
 
       const doc = new DOMParser().parseFromString(html, "text/html");
-      const products = extractFromDoc(doc);
-
       let fresh = 0;
-      products.forEach((p) => {
-        if (p.id && !seen.has(p.id)) { seen.add(p.id); state.allProducts.push(p); fresh++; }
+      productEls(doc).forEach((el) => {
+        const d = cardData(el);
+        if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); fresh++; }
       });
+      logLine("page " + pageNum + ": +" + fresh + " (total " + state.data.length + ")");
 
-      console.log("[SortRatings] page", pageNum, "→ products:", products.length, "fresh:", fresh);
-
-      if (!products.length || !fresh) {
-        pagesFail++;
-        dupStreak++;
-      } else {
-        pagesOk++;
-        dupStreak = 0;
-      }
-
-      // 🔑 Next page: official rel=next, na thakle constructed URL
-      nextUrl = getNextLink(doc) || (fresh ? base + sep + param + "=" + (pageNum + 1) : null);
+      if (!fresh) failStreak++; else failStreak = 0;
+      url = nextOf(doc) || (fresh ? base + sep + param + "=" + (pageNum + 1) : null);
       pageNum++;
-      await sleep(700);
+      await sleep(600);
     }
 
     state.scanning = false;
     hideStopBtn();
-    console.log("[SortRatings] DONE. pagesOk:", pagesOk, "pagesFail:", pagesFail, "total:", state.allProducts.length);
-    return state.allProducts;
+    logLine("== done: " + state.data.length + " products ==");
+    hideLogLater(12);
+    return state.data;
   }
 
-  // ─── Sort + rearrange (DOM node move) ───
-  function sortAndRearrange(products) {
-    if (!products.length) return;
-
-    const data = products.map((p, idx) => ({ node: p.node, idx, ratings: p.ratings, sponsored: p.sponsored }));
-    state.originalOrder = products.map((p) => p.node);
-
-    data.sort((a, b) => {
-      if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
-      if (b.ratings !== a.ratings) return b.ratings - a.ratings;
-      return a.idx - b.idx;
-    });
-
-    const parent = products[0].node.parentElement;
-    if (!parent) { alert("❌ Parent container not found!"); return; }
-
-    data.forEach((d, rank) => addBadge(d.node, d.ratings, rank, d.sponsored));
-    data.forEach((d) => parent.appendChild(d.node));
-
-    state.sorted = true;
-    updateSortBtn();
-
-    const ads = data.filter((d) => d.sponsored).length;
-    toast("✅ " + data.length + " products sorted!\n🏆 Top: " + fmt(data[0].ratings) + " ratings\n📢 AD: " + ads + " (last e)");
-    window.scrollTo({ top: 0, behavior: "smooth" });
+  // ─── Own clean grid render ───
+  function cardEl(d) {
+    const a = document.createElement("a");
+    a.className = "fs-card";
+    a.href = d.href || "#";
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.innerHTML =
+      '<img loading="lazy" src="' + (d.img || "") + '" alt="">' +
+      '<div class="fs-rate">⭐ ' + fmt(d.ratings) + "</div>" +
+      (d.sponsored ? '<div class="fs-ad">AD</div>' : "") +
+      '<div class="fs-info">' +
+      (d.brand ? '<div class="fs-brand"></div>' : "") +
+      '<div class="fs-name"></div>' +
+      (d.price ? '<div class="fs-price"></div>' : "") +
+      "</div>";
+    const q = (s) => a.querySelector(s);
+    if (d.brand) q(".fs-brand").textContent = d.brand.trim();
+    q(".fs-name").textContent = (d.name || "").trim();
+    if (d.price) q(".fs-price").textContent = d.price;
+    return a;
   }
 
-  function restoreOriginal() {
-    if (!state.originalOrder.length) return;
-    document.querySelectorAll(".fs-badge").forEach((el) => el.remove());
-    const parent = state.originalOrder[0].parentElement;
-    if (!parent) return;
-    state.originalOrder.forEach((node) => parent.appendChild(node));
-    state.sorted = false;
-    state.originalOrder = [];
-    state.allProducts = [];
-    updateSortBtn();
-    toast("🔄 Original order restored!");
+  function injectCSS() {
+    if (document.getElementById("fs-css")) return;
+    const s = document.createElement("style");
+    s.id = "fs-css";
+    s.textContent =
+      ".fs-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:12px;padding:14px;background:#fff;}" +
+      ".fs-card{position:relative;display:block;background:#fff;border:1px solid #eaeaec;border-radius:6px;overflow:hidden;text-decoration:none;color:#282c3f;}" +
+      ".fs-card:hover{box-shadow:0 3px 12px rgba(0,0,0,.15);}" +
+      ".fs-card img{width:100%;aspect-ratio:3/4;object-fit:cover;display:block;background:#f5f5f6;}" +
+      ".fs-rate{position:absolute;top:6px;left:6px;background:rgba(255,255,255,.95);color:#282c3f;font:700 11px/1 Arial;padding:5px 7px;border-radius:4px;box-shadow:0 1px 4px rgba(0,0,0,.2);}" +
+      ".fs-ad{position:absolute;top:6px;right:6px;background:#9e9e9e;color:#fff;font:700 10px/1 Arial;padding:4px 6px;border-radius:4px;}" +
+      ".fs-info{padding:8px 10px 12px;font:12px/1.35 Arial,sans-serif;}" +
+      ".fs-brand{font-weight:700;margin-bottom:2px;}" +
+      ".fs-name{color:#535766;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}" +
+      ".fs-price{font-weight:700;margin-top:6px;}" +
+      ".fs-bar{display:flex;align-items:center;gap:12px;background:#fff;border-bottom:1px solid #eaeaec;padding:10px 14px;font:600 14px Arial;}" +
+      ".fs-more{display:block;margin:16px auto;padding:12px 30px;background:#2874f0;color:#fff;border:none;border-radius:22px;font:600 14px Arial;cursor:pointer;}";
+    document.head.appendChild(s);
   }
 
-  function addBadge(node, ratings, rank, sponsored) {
-    const old = node.querySelector(".fs-badge");
+  function render() {
+    injectCSS();
+
+    // Hide originals (remove না!)
+    state.hiddenEls = [];
+    let anchor = null;
+    if (IS_MYNTRA) {
+      anchor = document.getElementById("desktopSearchResults");
+      if (!anchor) {
+        const ul = document.querySelector("ul.results-base");
+        anchor = ul ? ul.parentElement : null;
+      }
+    } else {
+      const rows = Array.from(document.querySelectorAll("div.nZIRY7"))
+        .filter((r) => r.querySelector('div[data-id] a[href*="/p/"]'));
+      const secs = [];
+      rows.forEach((r) => {
+        const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
+        if (s && secs.indexOf(s) === -1) secs.push(s);
+      });
+      secs.forEach((s) => { s.style.display = "none"; state.hiddenEls.push(s); });
+      anchor = secs[0] || null;
+    }
+    if (anchor) {
+      if (state.hiddenEls.indexOf(anchor) === -1 && IS_MYNTRA) {
+        anchor.style.display = "none";
+        state.hiddenEls.push(anchor);
+      }
+    }
+
+    // Our container
+    const wrap = document.createElement("div");
+    wrap.id = "fs-wrap";
+    wrap.style.cssText = "background:#fff;";
+    const bar = document.createElement("div");
+    bar.className = "fs-bar";
+    const ads = state.data.filter((d) => d.sponsored).length;
+    bar.textContent =
+      "⭐ Sorted by most rated — " + state.data.length + " products (" + ads + " AD last e)";
+    wrap.appendChild(bar);
+    const grid = document.createElement("div");
+    grid.className = "fs-grid";
+    wrap.appendChild(grid);
+
+    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(wrap, anchor);
+    else document.body.appendChild(wrap);
+    state.wrap = wrap;
+    state.rendered = 0;
+    appendChunk();
+  }
+
+  function appendChunk() {
+    const grid = state.wrap.querySelector(".fs-grid");
+    const end = Math.min(state.rendered + CHUNK, state.data.length);
+    const frag = document.createDocumentFragment();
+    for (let i = state.rendered; i < end; i++) frag.appendChild(cardEl(state.data[i]));
+    state.rendered = end;
+    const old = state.wrap.querySelector(".fs-more");
     if (old) old.remove();
-    const b = document.createElement("div");
-    b.className = "fs-badge";
-    b.style.cssText =
-      "position:absolute;top:8px;right:8px;z-index:9999;color:#fff;font:700 12px/1 Arial,sans-serif;" +
-      "padding:5px 9px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.3);pointer-events:none;" +
-      "background:" + (sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
-    b.textContent = sponsored ? "📢 AD" : "⭐ " + fmt(ratings);
-    b.title = "Ratings: " + ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
-    node.style.position = "relative";
-    node.appendChild(b);
+    grid.appendChild(frag);
+    if (state.rendered < state.data.length) {
+      const b = document.createElement("button");
+      b.className = "fs-more";
+      b.textContent = "⬇️ Load more (" + state.rendered + "/" + state.data.length + ")";
+      b.onclick = appendChunk;
+      state.wrap.appendChild(b);
+    }
   }
 
-  // ─── Main ───
+  function restore(silent) {
+    if (state.wrap) { state.wrap.remove(); state.wrap = null; }
+    state.hiddenEls.forEach((el) => { if (el.isConnected) el.style.display = ""; });
+    state.hiddenEls = [];
+    state.data = [];
+    state.rendered = 0;
+    state.sorted = false;
+    updateSortBtn();
+    if (!silent) toast("🔄 Original page restored!");
+  }
+
   async function sortByRatings() {
     if (!state.enabled || state.scanning) return;
-    if (state.sorted) { restoreOriginal(); return; }
+    if (state.sorted) { restore(false); return; }
 
-    const perPage = IS_FLIPKART ? 40 : 50;
+    const per = IS_FLIPKART ? 40 : 50;
     const input = prompt(
-      (IS_FLIPKART ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n\n" +
-      "প্রতি page = " + perPage + " products\n" +
-      "10 page = " + (perPage * 10) + " | 50 page = " + (perPage * 50) + "\n\nসংখ্যা লেখো:",
-      "10"
+      (IS_FLIPKART ? "Flipkart" : "Myntra") + ": কত PAGE scan করবে?\n" +
+      "(প্রতি page = " + per + " products)\n\n" +
+      "5 = " + per * 5 + " | 20 = " + per * 20 + " | 100 = " + per * 100 + "\n\nসংখ্যা লেখো:",
+      "5"
     );
     if (input === null) return;
     const maxPages = parseInt(input.trim(), 10);
     if (!maxPages || maxPages < 1) { alert("❌ সঠিক সংখ্যা দাও!"); return; }
 
-    const products = await fetchAllPages(maxPages);
-    if (!products.length) { alert("❌ কোনো product collect হয়নি!"); return; }
+    const data = await collect(maxPages);
+    if (!data.length) { alert("❌ কোনো product পাইনি!"); return; }
 
-    if (products.length <= perPage) {
-      toast("⚠️ শুধু current page collect হয়েছে (" + products.length + ")\nSite multi-page block করছে। Console log দেখো (F12)");
-    }
+    data.sort((a, b) => {
+      if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
+      return b.ratings - a.ratings;
+    });
 
-    sortAndRearrange(products);
+    render();
+    state.sorted = true;
+    updateSortBtn();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    toast("✅ " + data.length + " products sorted!\n🏆 Top: " + fmt(data[0].ratings) + " ratings");
   }
 
   // ─── UI ───
@@ -333,7 +395,6 @@
     state.pill = pill;
     updatePill();
   }
-
   function updatePill() {
     if (!state.pill) return;
     if (state.enabled) {
@@ -344,19 +405,17 @@
       state.pill.style.background = "linear-gradient(135deg,#c62828,#8e0000)";
     }
   }
-
   function setEnabled(on) {
     state.enabled = on;
     try { localStorage.setItem(LS_KEY, on ? "1" : "0"); } catch (e) {}
     if (!on) {
-      if (state.sorted) restoreOriginal();
+      if (state.sorted) restore(true);
       if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
       hideStopBtn();
       toast("🔴 OFF");
     } else { createSortButton(); toast("🟢 ON"); }
     updatePill();
   }
-
   function createSortButton() {
     if (state.sortBtn || !state.enabled) return;
     const b = document.createElement("div");
@@ -369,7 +428,6 @@
     state.sortBtn = b;
     updateSortBtn();
   }
-
   function updateSortBtn() {
     if (!state.sortBtn) return;
     if (state.sorted) {
@@ -380,7 +438,6 @@
       state.sortBtn.style.background = "linear-gradient(135deg,#2874f0,#1a4fb7)";
     }
   }
-
   function showStopBtn() {
     if (state.stopBtn) return;
     const s = document.createElement("div");
@@ -392,18 +449,16 @@
     document.body.appendChild(s);
     state.stopBtn = s;
   }
-
   function hideStopBtn() {
     if (state.stopBtn) { state.stopBtn.remove(); state.stopBtn = null; }
   }
 
-  // ─── SPA cleanup ───
   (function watchURL() {
     let last = location.href;
     new MutationObserver(() => {
       if (location.href !== last) {
         last = location.href;
-        if (state.sorted) restoreOriginal();
+        if (state.sorted || state.wrap) restore(true);
       }
     }).observe(document.body, { childList: true, subtree: true });
   })();
@@ -420,12 +475,11 @@
     if (!state.enabled) return;
     const t0 = Date.now();
     const iv = setInterval(() => {
-      if (getProductsFromDOM().length > 0 || Date.now() - t0 > 20000) {
-        clearInterval(iv);
-        createSortButton();
-      }
+      const has = IS_MYNTRA
+        ? document.querySelector("li.product-base")
+        : document.querySelector('div[data-id] a[href*="/p/"]');
+      if (has || Date.now() - t0 > 20000) { clearInterval(iv); createSortButton(); }
     }, 1000);
   }
-
   init();
 })();
