@@ -1,8 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Flipkart + Myntra Sort by Ratings",
-  "version": "13.0.0",
-  "description": "Sort Flipkart & Myntra results by ratings count. Sponsored/AD products at the end.",
+  "version": "19.0.0",
+  "description": "Sort search results by ratings count across pages. AD/Sponsored last.",
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": [
