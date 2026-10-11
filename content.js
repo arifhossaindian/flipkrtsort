@@ -1,6 +1,7 @@
 // ============================================
-// SORT BY RATINGS v14 - FLIPKART + MYNTRA + AMAZON READY
-// Myntra fixed: no price filter, proper |33.5k parsing
+// SORT BY RATINGS v15 - DOM NODE MOVE STRATEGY
+// Myntra: auto-scroll → collect all → sort → move nodes
+// Flipkart: fetch pages → collect all → sort → move nodes
 // ============================================
 
 (function () {
@@ -11,31 +12,25 @@
   const HOST = location.hostname.replace(/^www\./, "");
   const IS_FLIPKART = HOST.indexOf("flipkart.com") !== -1;
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
-  const IS_AMAZON = HOST.indexOf("amazon.") !== -1;
-  if (!IS_FLIPKART && !IS_MYNTRA && !IS_AMAZON) return;
+  if (!IS_FLIPKART && !IS_MYNTRA) return;
 
-  const LS_KEY = "sortratings_enabled_v14";
-  const CHUNK = 240;
+  const LS_KEY = "sortratings_enabled_v15";
 
   const state = {
     enabled: localStorage.getItem(LS_KEY) !== "0",
     sorted: false,
     scanning: false,
     stop: false,
-    products: [],
-    rendered: 0,
-    ourSection: null,
-    hiddenEls: [],
+    originalOrder: [],
+    sortedData: [],
     pill: null,
     sortBtn: null,
     stopBtn: null,
-    summaryEl: null,
-    savedSummary: null,
   };
 
-  // ─── Utils ───
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+  // ─── Parse number ───
   function parseDigits(t) {
     const d = String(t == null ? "" : t).replace(/[^0-9]/g, "");
     if (!d || d.length > 8) return 0;
@@ -43,10 +38,10 @@
     return isFinite(n) && n >= 0 ? n : 0;
   }
 
-  // Myntra: "33.5k", "10.8k", "79.4k", "22", "192" → number
+  // Myntra: "33.5k", "10.8k" → number
   function parseMyntraCount(t) {
     let s = String(t || "").trim().toLowerCase();
-    s = s.replace(/^[^0-9]+/, ""); // Remove leading |, separators
+    s = s.replace(/^[^0-9]+/, "");
     const m = s.match(/^([\d.]+)\s*(k|m|l)?/);
     if (!m) return 0;
     let n = parseFloat(m[1]);
@@ -84,333 +79,288 @@
     t._timer = setTimeout(() => (t.style.opacity = "0"), 3500);
   }
 
-  // ============================================
-  // SITE ADAPTERS
-  // ============================================
-  const ADAPTER = {
-    flipkart: {
-      name: "Flipkart",
-      pageParam: "page",
-      gridTag: "div",
-      cards(doc) {
-        return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
-          if (el.querySelector("div[data-id]")) return false;
-          if (!el.querySelector('a[href*="/p/"]')) return false;
-          const txt = el.textContent || "";
-          return txt.indexOf("₹") !== -1 && !!el.querySelector("img");
-        });
-      },
-      id(el) { return el.getAttribute("data-id") || ""; },
-      ratings(el) {
-        const s = el.querySelector("span.PvbNMB");
-        if (s) { const n = parseDigits(s.textContent); if (n > 0) return n; }
-        const m = (el.textContent || "").match(/\(([\d,]+)\)/);
-        return m ? parseDigits(m[1]) : 0;
-      },
-      sponsored(el) { return !!el.querySelector(".IxWX8O"); },
-      rows() {
-        return Array.from(document.querySelectorAll("div.nZIRY7"))
-          .filter((r) => r.querySelector('div[data-id] a[href*="/p/"]'));
-      },
-      gridClass: "nZIRY7",
-      summary() { return document.querySelector("span._Omnvo"); },
-    },
-
-    myntra: {
-      name: "Myntra",
-      pageParam: "p",
-      gridTag: "ul",
-      cards(doc) {
-        // FIX: NO price filter! Just ratings container check
-        return Array.from(doc.querySelectorAll("li.product-base")).filter((el) => {
-          if (!el.querySelector(".product-ratingsContainer")) return false;
-          const id = el.getAttribute("id");
-          return !!id && /^\d+$/.test(id);
-        });
-      },
-      id(el) { return el.getAttribute("id") || ""; },
-      ratings(el) {
-        const rc = el.querySelector(".product-ratingsCount");
-        if (!rc) return 0;
-        // Handle "|33.5k" and "33.5k" formats
-        const txt = rc.textContent || "";
-        return parseMyntraCount(txt);
-      },
-      sponsored(el) {
-        const w = el.querySelector(".product-waterMark");
-        return w ? /AD/i.test(w.textContent || "") : false;
-      },
-      rows() {
-        const ul = document.querySelector("ul.results-base");
-        if (ul) return [ul];
-        const first = document.querySelector("li.product-base");
-        return first && first.parentElement ? [first.parentElement] : [];
-      },
-      gridClass: "results-base",
-      summary() {
-        return Array.from(document.querySelectorAll("h1, span, div, p"))
-          .find((s) => /^\s*Showing\s+\d+\s+-\s+\d+\s+of\s+\d+/i.test(s.textContent || ""));
-      },
-    },
-  };
-
-  const SITE = IS_FLIPKART ? ADAPTER.flipkart : ADAPTER.myntra;
-
-  // ─── Extract from parsed doc ───
-  function extractFromDoc(doc) {
-    const out = [];
-    SITE.cards(doc).forEach((el) => {
-      out.push({
-        id: SITE.id(el),
-        html: el.outerHTML,
-        ratings: SITE.ratings(el),
-        sponsored: SITE.sponsored(el),
+  // ─── Get products (DOM nodes) ───
+  function getProducts() {
+    if (IS_FLIPKART) {
+      return Array.from(document.querySelectorAll("div[data-id]")).filter((el) => {
+        if (el.querySelector("div[data-id]")) return false;
+        if (!el.querySelector('a[href*="/p/"]')) return false;
+        const txt = el.textContent || "";
+        return txt.indexOf("₹") !== -1 && !!el.querySelector("img");
       });
-    });
-    return out;
+    } else {
+      return Array.from(document.querySelectorAll("li.product-base")).filter((el) => {
+        return !!el.querySelector(".product-ratingsContainer");
+      });
+    }
   }
 
-  // ─── Extract from current DOM (fallback) ───
-  function extractFromCurrent() {
-    const out = [];
-    SITE.cards(document).forEach((el) => {
-      out.push({
-        id: SITE.id(el),
-        html: el.outerHTML,
-        ratings: SITE.ratings(el),
-        sponsored: SITE.sponsored(el),
-      });
-    });
-    return out;
+  // ─── Get ratings count ───
+  function getRatings(el) {
+    if (IS_FLIPKART) {
+      const s = el.querySelector("span.PvbNMB");
+      if (s) {
+        const n = parseDigits(s.textContent);
+        if (n > 0) return n;
+      }
+      const m = (el.textContent || "").match(/\(([\d,]+)\)/);
+      return m ? parseDigits(m[1]) : 0;
+    } else {
+      const rc = el.querySelector(".product-ratingsCount");
+      if (!rc) return 0;
+      const txt = rc.textContent || "";
+      return parseMyntraCount(txt);
+    }
   }
 
-  // ─── Scan pages ───
-  async function scan(maxPages) {
+  // ─── Check sponsored ───
+  function isSponsored(el) {
+    if (IS_FLIPKART) {
+      return !!el.querySelector(".IxWX8O");
+    } else {
+      const w = el.querySelector(".product-waterMark");
+      return w ? /AD/i.test(w.textContent || "") : false;
+    }
+  }
+
+  // ─── Load all products (Myntra: auto-scroll) ───
+  async function loadAllMyntra() {
     state.scanning = true;
     state.stop = false;
-    state.products = [];
-    const seen = new Set();
+    showStopBtn();
 
-    const base = location.href
-      .replace(/([?&])(page|p)=\d+&?/g, "$1")
-      .replace(/[?&]$/, "");
-    const sep = base.indexOf("?") !== -1 ? "&" : "?";
+    let lastCount = 0;
+    let stableCount = 0;
+    let scrollAttempts = 0;
+    const maxAttempts = 1000;
 
-    let totalPages = maxPages;
-    let fetchWorked = false;
+    while (scrollAttempts < maxAttempts && !state.stop) {
+      const products = getProducts();
+      const currentCount = products.length;
 
-    // Always include current page products first
-    extractFromCurrent().forEach((c) => {
-      if (c.id && !seen.has(c.id)) {
-        seen.add(c.id);
-        state.products.push(c);
-      }
-    });
+      toast(`🔄 Loading... ${currentCount} products\nScroll #${scrollAttempts + 1}`);
 
-    for (let p = 1; p <= totalPages; p++) {
-      if (state.stop) break;
-      showStopBtn();
-      toast("🔍 Page " + p + "/" + (totalPages === Infinity ? "?" : totalPages) +
-        " scanning...\n📦 Collected: " + state.products.length);
-
-      let doc = null;
-      try {
-        const res = await fetch(base + sep + SITE.pageParam + "=" + p, {
-          credentials: "include",
-          headers: { "Accept": "text/html" },
-        });
-        if (!res.ok) {
-          if (p === 1 && !fetchWorked) {
-            toast("⚠️ Multi-page scan failed.\nSorting " + state.products.length + " products on current page...");
-          }
+      if (currentCount === lastCount) {
+        stableCount++;
+        if (stableCount >= 5) {
+          toast(`✅ All loaded! Total: ${currentCount}`);
           break;
         }
-        fetchWorked = true;
-        doc = new DOMParser().parseFromString(await res.text(), "text/html");
-      } catch (e) {
-        if (p === 1 && !fetchWorked) {
-          toast("⚠️ Fetch failed. Sorting current page only...");
-        }
-        break;
+      } else {
+        stableCount = 0;
+        lastCount = currentCount;
       }
 
-      const cards = extractFromDoc(doc);
-      if (!cards.length) break;
-
-      let fresh = 0;
-      for (const c of cards) {
-        if (c.id && !seen.has(c.id)) {
-          seen.add(c.id);
-          state.products.push(c);
-          fresh++;
-        }
-      }
-      if (!fresh) break;
-
-      // Myntra: total pages from first page
-      if (p === 1 && IS_MYNTRA) {
-        const summary = (doc.body.textContent || "").match(/of\s+([\d,]+)\s+items/i);
-        if (summary) {
-          const total = parseDigits(summary[1]);
-          if (total > 0) {
-            const tp = Math.ceil(total / 50);
-            totalPages = maxPages === Infinity ? tp : Math.min(maxPages, tp);
-          }
-        }
-      }
-      await sleep(600);
+      window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+      await sleep(2000);
+      scrollAttempts++;
     }
 
     state.scanning = false;
     hideStopBtn();
+    return getProducts();
   }
 
-  // ─── Hide originals (remove KORBO NA) ───
-  function hideOriginals() {
-    const sections = [];
-    SITE.rows().forEach((r) => {
-      const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
-      if (s && sections.indexOf(s) === -1) sections.push(s);
-    });
-    const pag = Array.from(document.querySelectorAll("div, nav"))
-      .find((d) => /Page\s+\d+\s+of\s+\d+/i.test(d.textContent || "") && d.querySelector("nav, a"));
-    if (pag && sections.indexOf(pag) === -1) sections.push(pag);
+  // ─── Load all products (Flipkart: fetch pages) ───
+  async function loadAllFlipkart() {
+    state.scanning = true;
+    state.stop = false;
+    showStopBtn();
 
-    sections.forEach((s) => {
-      if (s && s.style.display !== "none") {
-        s.style.display = "none";
-        state.hiddenEls.push(s);
+    const input = prompt(
+      "Flipkart: কতগুলো PAGE scan করবে?\n\n" +
+      "• খালি OK = ALL pages\n" +
+      "• সংখ্যা লেখো (যেমন 50)",
+      ""
+    );
+    if (input === null) {
+      state.scanning = false;
+      hideStopBtn();
+      return [];
+    }
+
+    const maxPages = input.trim() === "" ? Infinity : (parseInt(input, 10) || Infinity);
+    const base = location.href.replace(/([?&])page=\d+&?/g, "$1").replace(/[?&]$/, "");
+    const sep = base.indexOf("?") !== -1 ? "&" : "?";
+
+    const allProducts = [];
+    const seenIds = new Set();
+
+    // Current page products
+    getProducts().forEach((el) => {
+      const id = el.getAttribute("data-id");
+      if (id && !seenIds.has(id)) {
+        seenIds.add(id);
+        allProducts.push(el);
       }
     });
-    return sections[0] || null;
+
+    for (let p = 1; p <= maxPages && !state.stop; p++) {
+      toast(`🔍 Page ${p} fetching...\n📦 Collected: ${allProducts.length}`);
+
+      try {
+        const res = await fetch(base + sep + "page=" + p, { credentials: "include" });
+        if (!res.ok) break;
+
+        const html = await res.text();
+        const doc = new DOMParser().parseFromString(html, "text/html");
+        const cards = doc.querySelectorAll("div[data-id]");
+
+        let fresh = 0;
+        cards.forEach((card) => {
+          if (card.querySelector("div[data-id]")) return;
+          if (!card.querySelector('a[href*="/p/"]')) return;
+          const txt = card.textContent || "";
+          if (txt.indexOf("₹") === -1 || !card.querySelector("img")) return;
+
+          const id = card.getAttribute("data-id");
+          if (id && !seenIds.has(id)) {
+            seenIds.add(id);
+            // Create DOM node from HTML
+            const tpl = document.createElement("template");
+            tpl.innerHTML = card.outerHTML.trim();
+            const node = tpl.content.firstElementChild;
+            if (node) allProducts.push(node);
+            fresh++;
+          }
+        });
+
+        if (!fresh) break;
+        await sleep(600);
+      } catch (e) {
+        break;
+      }
+    }
+
+    state.scanning = false;
+    hideStopBtn();
+    return allProducts;
   }
 
-  function unhideAll() {
-    state.hiddenEls.forEach((s) => { if (s.isConnected) s.style.display = ""; });
-    state.hiddenEls = [];
+  // ─── Sort and rearrange (DOM nodes move) ───
+  function sortProducts(products) {
+    if (!products.length) return;
+
+    // Extract data
+    const data = products.map((el, idx) => ({
+      el,
+      idx,
+      ratings: getRatings(el),
+      sponsored: isSponsored(el),
+    }));
+
+    // Save original order
+    state.originalOrder = products.slice();
+    state.sortedData = data;
+
+    // Sort: sponsored last, then by ratings descending
+    data.sort((a, b) => {
+      if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
+      if (b.ratings !== a.ratings) return b.ratings - a.ratings;
+      return a.idx - b.idx;
+    });
+
+    // Get parent container
+    const parent = products[0].parentElement;
+    if (!parent) {
+      alert("❌ Parent container not found!");
+      return;
+    }
+
+    // Add badges
+    data.forEach((d, rank) => {
+      addBadge(d.el, d.ratings, rank, d.sponsored);
+    });
+
+    // Re-append in sorted order (DOM nodes move, not copy!)
+    data.forEach((d) => {
+      parent.appendChild(d.el);
+    });
+
+    state.sorted = true;
+    updateSortBtn();
+
+    const sponsoredCount = data.filter((d) => d.sponsored).length;
+    const maxRatings = data.length > 0 ? data[0].ratings : 0;
+
+    toast(
+      `✅ ${data.length} products sorted!\n` +
+      `🏆 Most rated: ${fmt(maxRatings)}\n` +
+      `📢 Sponsored: ${sponsoredCount} (last)`
+    );
+
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  // ─── Card + badge ───
-  function makeCard(p, rank) {
-    const tpl = document.createElement("template");
-    tpl.innerHTML = p.html.trim();
-    const card = tpl.content.firstElementChild;
-    if (!card) return null;
-    card.style.position = "relative";
-    card.style.listStyle = "none";
+  // ─── Restore original order ───
+  function restoreOriginal() {
+    if (!state.originalOrder.length) return;
+
+    // Remove badges
+    document.querySelectorAll(".fs-badge").forEach((el) => el.remove());
+
+    // Get parent
+    const parent = state.originalOrder[0].parentElement;
+    if (!parent) return;
+
+    // Re-append in original order
+    state.originalOrder.forEach((el) => {
+      parent.appendChild(el);
+    });
+
+    state.sorted = false;
+    state.originalOrder = [];
+    state.sortedData = [];
+    updateSortBtn();
+    toast("🔄 Original order restored!");
+  }
+
+  // ─── Add badge ───
+  function addBadge(el, ratings, rank, sponsored) {
+    const old = el.querySelector(".fs-badge");
+    if (old) old.remove();
 
     const b = document.createElement("div");
+    b.className = "fs-badge";
     b.style.cssText =
-      "position:absolute;top:8px;right:8px;z-index:5;color:#fff;font:700 12px/1 Arial,sans-serif;" +
+      "position:absolute;top:8px;right:8px;z-index:9999;color:#fff;font:700 12px/1 Arial,sans-serif;" +
       "padding:5px 9px;border-radius:12px;box-shadow:0 2px 6px rgba(0,0,0,.3);pointer-events:none;" +
-      "background:" + (p.sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
-    b.textContent = p.sponsored ? "📢 AD" : "⭐ " + fmt(p.ratings);
-    b.title = "Ratings: " + p.ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
-    card.appendChild(b);
-    return card;
-  }
+      "background:" + (sponsored ? "#9e9e9e" : "linear-gradient(135deg,#ff9800,#f57c00)") + ";";
+    b.textContent = sponsored ? "📢 AD" : "⭐ " + fmt(ratings);
+    b.title = "Ratings: " + ratings.toLocaleString("en-IN") + " • Rank #" + (rank + 1);
 
-  function appendChunk() {
-    if (!state.ourSection) return;
-    const grid = state.ourSection.querySelector("[data-fs-grid]");
-    const end = Math.min(state.rendered + CHUNK, state.products.length);
-    const frag = document.createDocumentFragment();
-    for (let i = state.rendered; i < end; i++) {
-      const el = makeCard(state.products[i], i);
-      if (el) frag.appendChild(el);
-    }
-    state.rendered = end;
-
-    const old = state.ourSection.querySelector(".fs-loadmore");
-    if (old) old.remove();
-    grid.appendChild(frag);
-
-    if (state.rendered < state.products.length) {
-      const b = document.createElement("button");
-      b.className = "fs-loadmore";
-      b.textContent = "⬇️ Load more (" + state.rendered + "/" + state.products.length + " shown)";
-      b.style.cssText =
-        "display:block;margin:18px auto;padding:12px 30px;background:#2874f0;color:#fff;border:none;" +
-        "border-radius:22px;font:600 14px Arial,sans-serif;cursor:pointer;";
-      b.onclick = () => { appendChunk(); updateSummary(); };
-      state.ourSection.appendChild(b);
-    }
-  }
-
-  function updateSummary() {
-    if (!state.summaryEl) return;
-    state.summaryEl.textContent =
-      "Showing 1 – " + state.rendered + " of " + state.products.length +
-      " results  (⭐ sorted by most rated)";
-  }
-
-  // ─── Restore ───
-  function restore(silent) {
-    if (state.ourSection) { state.ourSection.remove(); state.ourSection = null; }
-    unhideAll();
-    if (state.summaryEl && state.savedSummary != null) state.summaryEl.innerHTML = state.savedSummary;
-    state.summaryEl = null; state.savedSummary = null;
-    state.products = []; state.rendered = 0; state.sorted = false;
-    hideStopBtn();
-    updateSortBtn();
-    if (!silent) toast("🔄 Original page restored!");
+    el.style.position = "relative";
+    el.appendChild(b);
   }
 
   // ─── Main sort ───
   async function sortByRatings() {
     if (!state.enabled || state.scanning) return;
-    if (state.sorted) { restore(false); return; }
-
-    const siteName = SITE.name;
-    const input = prompt(
-      siteName + ": কতগুলো PAGE scan করবে?\n\n" +
-      "• খালি রেখে OK = যতগুলো page আছে সব\n" +
-      "• সংখ্যা লেখো (যেমন 20) = প্রথম 20 page\n" +
-      "• লেখো 1 = শুধু current page (fast)",
-      IS_MYNTRA ? "20" : ""
-    );
-    if (input === null) return;
-    const maxPages = input.trim() === "" ? Infinity : (parseInt(input, 10) || Infinity);
-
-    await scan(maxPages);
-    if (!state.products.length) {
-      alert("❌ কোনো product collect হয়নি!\n\nPage refresh (F5) করে আবার try করো।");
+    if (state.sorted) {
+      restoreOriginal();
       return;
     }
 
-    state.products.sort((a, b) => {
-      if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
-      return b.ratings - a.ratings;
-    });
+    let products;
 
-    const anchor = hideOriginals();
+    if (IS_MYNTRA) {
+      const confirm = window.confirm(
+        "Myntra: Auto-scroll করে সব products load করবে।\n" +
+        "এতে 5-15 মিনিট লাগতে পারে।\n\n" +
+        "OK = Start loading all products"
+      );
+      if (!confirm) return;
+      products = await loadAllMyntra();
+    } else {
+      products = await loadAllFlipkart();
+    }
 
-    state.summaryEl = SITE.summary();
-    if (state.summaryEl && state.savedSummary == null) state.savedSummary = state.summaryEl.innerHTML;
+    if (!products.length) {
+      alert("❌ কোনো product collect হয়নি!");
+      return;
+    }
 
-    const sec = document.createElement("div");
-    sec.className = "lvJbLV col-12-12";
-    const grid = document.createElement(SITE.gridTag);
-    grid.className = SITE.gridClass;
-    grid.setAttribute("data-fs-grid", "1");
-    grid.style.cssText = IS_MYNTRA
-      ? "display:flex;flex-wrap:wrap;width:100%;margin:0;padding:0;list-style:none;gap:0;"
-      : "display:flex;flex-wrap:wrap;width:100%;";
-    sec.appendChild(grid);
-    state.ourSection = sec;
-    state.rendered = 0;
-
-    if (anchor && anchor.parentNode) anchor.parentNode.insertBefore(sec, anchor);
-    else document.body.appendChild(sec);
-
-    appendChunk();
-    updateSummary();
-    state.sorted = true;
-    updateSortBtn();
-    window.scrollTo({ top: 0, behavior: "smooth" });
-
-    const ad = state.products.filter((p) => p.sponsored).length;
-    toast("✅ " + state.products.length + " products sorted!\n📢 AD: " + ad + " (last e)");
+    sortProducts(products);
   }
 
   // ─── ON/OFF pill ───
@@ -440,10 +390,15 @@
 
   function setEnabled(on) {
     state.enabled = on;
-    try { localStorage.setItem(LS_KEY, on ? "1" : "0"); } catch (e) {}
+    try {
+      localStorage.setItem(LS_KEY, on ? "1" : "0");
+    } catch (e) {}
     if (!on) {
-      if (state.sorted) restore(true);
-      if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
+      if (state.sorted) restoreOriginal();
+      if (state.sortBtn) {
+        state.sortBtn.remove();
+        state.sortBtn = null;
+      }
       hideStopBtn();
       toast("🔴 OFF");
     } else {
@@ -485,12 +440,18 @@
     s.style.cssText =
       "position:fixed;right:26px;bottom:88px;z-index:2147483647;cursor:pointer;background:#d32f2f;" +
       "color:#fff;border-radius:20px;padding:9px 18px;font:700 13px Arial,sans-serif;";
-    s.onclick = () => { state.stop = true; };
+    s.onclick = () => {
+      state.stop = true;
+    };
     document.body.appendChild(s);
     state.stopBtn = s;
   }
+
   function hideStopBtn() {
-    if (state.stopBtn) { state.stopBtn.remove(); state.stopBtn = null; }
+    if (state.stopBtn) {
+      state.stopBtn.remove();
+      state.stopBtn = null;
+    }
   }
 
   // ─── SPA navigation cleanup ───
@@ -499,7 +460,7 @@
     new MutationObserver(() => {
       if (location.href !== last) {
         last = location.href;
-        if (state.ourSection || state.hiddenEls.length) restore(true);
+        if (state.sorted) restoreOriginal();
       }
     }).observe(document.body, { childList: true, subtree: true });
   })();
@@ -518,9 +479,7 @@
     if (!state.enabled) return;
     const t0 = Date.now();
     const iv = setInterval(() => {
-      const has = IS_FLIPKART
-        ? document.querySelector('div[data-id] a[href*="/p/"]')
-        : document.querySelector("li.product-base");
+      const has = getProducts().length > 0;
       if (has || Date.now() - t0 > 20000) {
         clearInterval(iv);
         createSortButton();
