@@ -228,7 +228,7 @@
     return productEls(document).map((el) => cardData(el, map));
   }
 
-  // ─── WORKER MODE ───
+    // ─── WORKER MODE ───
   try {
     chrome.runtime.sendMessage({ type: "FS_WORKER_READY" }, (resp) => {
       if (chrome.runtime.lastError) return;
@@ -237,19 +237,30 @@
       (async () => {
         const t0 = Date.now();
         let els = [];
-        while (Date.now() - t0 < 12000) {
+        while (Date.now() - t0 < 15000) {
           els = productEls(document);
           if (els.length) break;
           await sleep(500);
         }
         await sleep(1200);
         els = productEls(document);
+
+        // Khali page hole karon detect koro
+        let blocked = false, noResults = false;
+        if (!els.length) {
+          const bodyTxt = ((document.body && document.body.innerText) || "").slice(0, 4000);
+          blocked = /captcha|verify you are human|unusual traffic|access denied|are you a robot|blocked/i.test(bodyTxt);
+          noResults = /no\s+(products|results|matches)\s+found|sorry!?\s*no\s+results|no\s+more\s+results/i.test(bodyTxt);
+        }
+
         const map = IS_MYNTRA ? parseJsonProducts(document) : null;
         try {
           chrome.runtime.sendMessage({
             type: "FS_WORKER_DONE",
             scanId: resp.scanId,
             products: els.map((el) => cardData(el, map)),
+            blocked: blocked,
+            noResults: noResults,
           });
         } catch (e) {}
       })();
