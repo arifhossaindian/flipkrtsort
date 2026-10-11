@@ -1,7 +1,6 @@
 // ============================================
-// SORT BY RATINGS v13 - FLIPKART + MYNTRA
-// Flipkart: div[data-id] cards, (1,234) ratings, IxWX8O = sponsored
-// Myntra:   li.product-base cards, "33.5k" ratings, .product-waterMark = AD
+// SORT BY RATINGS v14 - FLIPKART + MYNTRA + AMAZON READY
+// Myntra fixed: no price filter, proper |33.5k parsing
 // ============================================
 
 (function () {
@@ -12,9 +11,10 @@
   const HOST = location.hostname.replace(/^www\./, "");
   const IS_FLIPKART = HOST.indexOf("flipkart.com") !== -1;
   const IS_MYNTRA = HOST.indexOf("myntra.com") !== -1;
-  if (!IS_FLIPKART && !IS_MYNTRA) return;
+  const IS_AMAZON = HOST.indexOf("amazon.") !== -1;
+  if (!IS_FLIPKART && !IS_MYNTRA && !IS_AMAZON) return;
 
-  const LS_KEY = "sortratings_enabled_v13";
+  const LS_KEY = "sortratings_enabled_v14";
   const CHUNK = 240;
 
   const state = {
@@ -43,15 +43,18 @@
     return isFinite(n) && n >= 0 ? n : 0;
   }
 
-  // Myntra: "33.5k" → 33500, "1.2L" → 120000, "447" → 447
+  // Myntra: "33.5k", "10.8k", "79.4k", "22", "192" → number
   function parseMyntraCount(t) {
-    const s = String(t || "").trim().toLowerCase();
-    const m = s.match(/^([\d.]+)\s*(k|m)?/);
+    let s = String(t || "").trim().toLowerCase();
+    s = s.replace(/^[^0-9]+/, ""); // Remove leading |, separators
+    const m = s.match(/^([\d.]+)\s*(k|m|l)?/);
     if (!m) return 0;
     let n = parseFloat(m[1]);
-    if (!isFinite(n)) return 0;
-    if (m[2] === "k") n *= 1000;
-    if (m[2] === "m") n *= 1000000;
+    if (!isFinite(n) || n < 0) return 0;
+    const suffix = m[2];
+    if (suffix === "k") n *= 1000;
+    else if (suffix === "m") n *= 1000000;
+    else if (suffix === "l") n *= 100000;
     n = Math.round(n);
     return n >= 0 && n <= 99999999 ? n : 0;
   }
@@ -86,7 +89,9 @@
   // ============================================
   const ADAPTER = {
     flipkart: {
+      name: "Flipkart",
       pageParam: "page",
+      gridTag: "div",
       cards(doc) {
         return Array.from(doc.querySelectorAll("div[data-id]")).filter((el) => {
           if (el.querySelector("div[data-id]")) return false;
@@ -112,56 +117,63 @@
     },
 
     myntra: {
+      name: "Myntra",
       pageParam: "p",
+      gridTag: "ul",
       cards(doc) {
+        // FIX: NO price filter! Just ratings container check
         return Array.from(doc.querySelectorAll("li.product-base")).filter((el) => {
-          const txt = el.textContent || "";
-          return txt.indexOf("Rs.") !== -1 || txt.indexOf("₹") !== -1;
+          if (!el.querySelector(".product-ratingsContainer")) return false;
+          const id = el.getAttribute("id");
+          return !!id && /^\d+$/.test(id);
         });
       },
       id(el) { return el.getAttribute("id") || ""; },
       ratings(el) {
         const rc = el.querySelector(".product-ratingsCount");
-        if (rc) {
-          // separator div bad diye baki text = "33.5k"
-          let txt = "";
-          rc.childNodes.forEach((n) => {
-            if (n.nodeType === 3) txt += n.textContent;
-            else if (!n.classList || !n.classList.contains("product-separator")) txt += n.textContent;
-          });
-          txt = txt.replace(/[|]/g, "").trim();
-          const n = parseMyntraCount(txt);
-          if (n > 0) return n;
-        }
-        const m = (el.textContent || "").match(/\|\s*([\d.]+[kKmM]?)/);
-        return m ? parseMyntraCount(m[1]) : 0;
+        if (!rc) return 0;
+        // Handle "|33.5k" and "33.5k" formats
+        const txt = rc.textContent || "";
+        return parseMyntraCount(txt);
       },
       sponsored(el) {
         const w = el.querySelector(".product-waterMark");
-        if (w && /AD/i.test(w.textContent || "")) return true;
-        return /\bAD\b/.test((el.querySelector(".product-imageSliderContainer") || {}).textContent || "");
+        return w ? /AD/i.test(w.textContent || "") : false;
       },
       rows() {
-        const uls = Array.from(document.querySelectorAll("ul.results-base"));
-        if (uls.length) return uls;
-        // fallback: product-base er common parent
+        const ul = document.querySelector("ul.results-base");
+        if (ul) return [ul];
         const first = document.querySelector("li.product-base");
         return first && first.parentElement ? [first.parentElement] : [];
       },
       gridClass: "results-base",
       summary() {
-        return Array.from(document.querySelectorAll("h1, span, div"))
-          .find((s) => /items?$/.test((s.textContent || "").trim().split(" - ").pop() || "") && /\d/.test(s.textContent || ""));
+        return Array.from(document.querySelectorAll("h1, span, div, p"))
+          .find((s) => /^\s*Showing\s+\d+\s+-\s+\d+\s+of\s+\d+/i.test(s.textContent || ""));
       },
     },
   };
 
   const SITE = IS_FLIPKART ? ADAPTER.flipkart : ADAPTER.myntra;
 
-  // ─── Extract from parsed page ───
+  // ─── Extract from parsed doc ───
   function extractFromDoc(doc) {
     const out = [];
     SITE.cards(doc).forEach((el) => {
+      out.push({
+        id: SITE.id(el),
+        html: el.outerHTML,
+        ratings: SITE.ratings(el),
+        sponsored: SITE.sponsored(el),
+      });
+    });
+    return out;
+  }
+
+  // ─── Extract from current DOM (fallback) ───
+  function extractFromCurrent() {
+    const out = [];
+    SITE.cards(document).forEach((el) => {
       out.push({
         id: SITE.id(el),
         html: el.outerHTML,
@@ -185,6 +197,15 @@
     const sep = base.indexOf("?") !== -1 ? "&" : "?";
 
     let totalPages = maxPages;
+    let fetchWorked = false;
+
+    // Always include current page products first
+    extractFromCurrent().forEach((c) => {
+      if (c.id && !seen.has(c.id)) {
+        seen.add(c.id);
+        state.products.push(c);
+      }
+    });
 
     for (let p = 1; p <= totalPages; p++) {
       if (state.stop) break;
@@ -194,30 +215,52 @@
 
       let doc = null;
       try {
-        const res = await fetch(base + sep + SITE.pageParam + "=" + p, { credentials: "include" });
-        if (!res.ok) break;
+        const res = await fetch(base + sep + SITE.pageParam + "=" + p, {
+          credentials: "include",
+          headers: { "Accept": "text/html" },
+        });
+        if (!res.ok) {
+          if (p === 1 && !fetchWorked) {
+            toast("⚠️ Multi-page scan failed.\nSorting " + state.products.length + " products on current page...");
+          }
+          break;
+        }
+        fetchWorked = true;
         doc = new DOMParser().parseFromString(await res.text(), "text/html");
-      } catch (e) { break; }
+      } catch (e) {
+        if (p === 1 && !fetchWorked) {
+          toast("⚠️ Fetch failed. Sorting current page only...");
+        }
+        break;
+      }
 
       const cards = extractFromDoc(doc);
       if (!cards.length) break;
 
       let fresh = 0;
       for (const c of cards) {
-        if (c.id && !seen.has(c.id)) { seen.add(c.id); state.products.push(c); fresh++; }
+        if (c.id && !seen.has(c.id)) {
+          seen.add(c.id);
+          state.products.push(c);
+          fresh++;
+        }
       }
       if (!fresh) break;
 
-      // Myntra: next-page link theke total page jano
+      // Myntra: total pages from first page
       if (p === 1 && IS_MYNTRA) {
-        const nl = doc.querySelector('link[rel="next"]');
-        if (nl) {
-          const m = (nl.getAttribute("href") || "").match(/[?&]p=(\d+)/);
-          if (m) { /* atleast 2 pages ache */ }
+        const summary = (doc.body.textContent || "").match(/of\s+([\d,]+)\s+items/i);
+        if (summary) {
+          const total = parseDigits(summary[1]);
+          if (total > 0) {
+            const tp = Math.ceil(total / 50);
+            totalPages = maxPages === Infinity ? tp : Math.min(maxPages, tp);
+          }
         }
       }
       await sleep(600);
     }
+
     state.scanning = false;
     hideStopBtn();
   }
@@ -229,7 +272,6 @@
       const s = r.closest(".lvJbLV.col-12-12") || r.parentElement;
       if (s && sections.indexOf(s) === -1) sections.push(s);
     });
-    // pagination bar
     const pag = Array.from(document.querySelectorAll("div, nav"))
       .find((d) => /Page\s+\d+\s+of\s+\d+/i.test(d.textContent || "") && d.querySelector("nav, a"));
     if (pag && sections.indexOf(pag) === -1) sections.push(pag);
@@ -319,18 +361,22 @@
     if (!state.enabled || state.scanning) return;
     if (state.sorted) { restore(false); return; }
 
-    const siteName = IS_FLIPKART ? "Flipkart" : "Myntra";
+    const siteName = SITE.name;
     const input = prompt(
       siteName + ": কতগুলো PAGE scan করবে?\n\n" +
-      "• খালি রেখে OK = যতগুলো page আছে সব (Myntra te onek page, time lagbe!)\n" +
-      "• সংখ্যা লেখো (যেমন 20) = প্রথম 20 page (50×20 = 1000 products)",
+      "• খালি রেখে OK = যতগুলো page আছে সব\n" +
+      "• সংখ্যা লেখো (যেমন 20) = প্রথম 20 page\n" +
+      "• লেখো 1 = শুধু current page (fast)",
       IS_MYNTRA ? "20" : ""
     );
     if (input === null) return;
     const maxPages = input.trim() === "" ? Infinity : (parseInt(input, 10) || Infinity);
 
     await scan(maxPages);
-    if (!state.products.length) { alert("❌ কোনো product collect হয়নি!"); return; }
+    if (!state.products.length) {
+      alert("❌ কোনো product collect হয়নি!\n\nPage refresh (F5) করে আবার try করো।");
+      return;
+    }
 
     state.products.sort((a, b) => {
       if (a.sponsored !== b.sponsored) return a.sponsored ? 1 : -1;
@@ -344,7 +390,7 @@
 
     const sec = document.createElement("div");
     sec.className = "lvJbLV col-12-12";
-    const grid = document.createElement(IS_MYNTRA ? "ul" : "div");
+    const grid = document.createElement(SITE.gridTag);
     grid.className = SITE.gridClass;
     grid.setAttribute("data-fs-grid", "1");
     grid.style.cssText = IS_MYNTRA
@@ -399,7 +445,7 @@
       if (state.sorted) restore(true);
       if (state.sortBtn) { state.sortBtn.remove(); state.sortBtn = null; }
       hideStopBtn();
-      toast("🔴 OFF — page ekhon pure " + (IS_FLIPKART ? "Flipkart" : "Myntra"));
+      toast("🔴 OFF");
     } else {
       createSortButton();
       toast("🟢 ON");
