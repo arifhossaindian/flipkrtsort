@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Sort by Ratings - Flipkart, Myntra & Amazon
 // @namespace    sortratings
-// @version      21.1.0
-// @description  Sort products by most ratings on Flipkart, Myntra & Amazon. Unlimited scan via infinite scroll + page fetch fallback. Anti-block.
+// @version      21.2.0
+// @description  Sort products by most ratings on Flipkart, Myntra & Amazon. Page-fetch primary + scroll bonus + Load More auto-click. Anti-block with slow delays & retry.
 // @author       you
 // @match        *://www.flipkart.com/*
 // @match        *://flipkart.com/*
@@ -40,7 +40,6 @@
     rendered: 0,
     wrap: null,
     hiddenEls: [],
-    pill: null,
     sortBtn: null,
     stopBtn: null,
     logBox: null,
@@ -101,7 +100,7 @@
     t.textContent = msg;
     t.style.opacity = "1";
     clearTimeout(t._timer);
-    t._timer = setTimeout(function () { t.style.opacity = "0"; }, 4500);
+    t._timer = setTimeout(function () { t.style.opacity = "0"; }, 5000);
   }
 
   // ---------- UI: log box ----------
@@ -109,7 +108,7 @@
     if (!state.logBox) {
       state.logBox = document.createElement("div");
       state.logBox.style.cssText =
-        "position:fixed;left:12px;bottom:12px;z-index:2147483647;width:320px;max-height:240px;" +
+        "position:fixed;left:12px;bottom:12px;z-index:2147483647;width:340px;max-height:260px;" +
         "overflow:auto;background:rgba(10,10,10,.92);color:#7CFC00;font:11px/1.5 monospace;" +
         "padding:10px;border-radius:8px;box-shadow:0 4px 14px rgba(0,0,0,.4);";
       document.body.appendChild(state.logBox);
@@ -296,7 +295,8 @@
   function extractFromHtml(html) {
     var doc = new DOMParser().parseFromString(html, "text/html");
     var map = IS_MYNTRA ? parseJsonProducts(doc) : null;
-    return productEls(doc).map(function (el) { return cardData(el, map); });
+    var els = productEls(doc);
+    return { products: els.map(function (el) { return cardData(el, map); }), count: els.length };
   }
 
   function detectBlocked(text) {
@@ -309,48 +309,28 @@
   }
 
   // ============================================
-  // METHOD 1 — infinite scroll (PRIMARY, unlimited)
+  // Find & click "Load More" buttons (helps lazy-load)
   // ============================================
-  async function startScrollScan(maxScrolls, seen) {
-    var stuckCount = 0;
-
-    logLine("== scroll method start (max " + maxScrolls + " scrolls) ==");
-    toast("🔄 Scrolling current page…\n(method: infinite scroll — unlimited)");
-
-    for (var i = 0; i < maxScrolls; i++) {
-      if (state.abort) break;
-
-      var beforeHeight = document.body.scrollHeight;
-      var beforeCount = state.data.length;
-
-      window.scrollTo(0, document.body.scrollHeight);
-      await sleep(800);
-      window.scrollTo(0, document.body.scrollHeight);
-      await sleep(1800);
-
-      var live = extractLive();
-      var added = 0;
-      for (var k = 0; k < live.length; k++) {
-        var d = live[k];
-        if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); added++; }
+  function clickLoadMore() {
+    var candidates = document.querySelectorAll("button, a, div[role='button'], span, li");
+    for (var i = 0; i < candidates.length; i++) {
+      var el = candidates[i];
+      var txt = ((el.textContent || "") + " " + (el.className || "") + " " + (el.getAttribute("aria-label") || "")).toLowerCase();
+      if (/load\s*more|show\s*more|view\s*more|see\s*more|next\s*page|more\s*results/i.test(txt)) {
+        var rect = el.getBoundingClientRect();
+        // only click if visible and in lower half of viewport area
+        if (rect.width > 30 && rect.height > 10 && rect.top > 200) {
+          try { el.click(); return true; } catch (e) {}
+        }
       }
-
-      var afterHeight = document.body.scrollHeight;
-      logLine("scroll " + (i + 1) + ": +" + added + " (total " + state.data.length + ")");
-
-      if (added === 0 && afterHeight <= beforeHeight) {
-        stuckCount++;
-        if (stuckCount >= 3) { logLine("scroll: no more products — stopping"); break; }
-      } else {
-        stuckCount = 0;
-      }
-
-      if (detectBlocked(document.body.innerText)) { logLine("scroll: captcha — stopping"); break; }
     }
+    return false;
   }
 
   // ============================================
-  // METHOD 2 — fetch next pages via GM_xmlhttpRequest (secondary)
+  // METHOD 1 — PAGE FETCH (PRIMARY)
+  // Fetches ?p=2, ?p=3... via GM_xmlhttpRequest
+  // Anti-block: slow random delay, retry on empty, 5-strike rule
   // ============================================
   function fetchPage(url) {
     return new Promise(function (resolve) {
@@ -359,11 +339,15 @@
           method: "GET",
           url: url,
           timeout: 25000,
-          onload: function (resp) { resolve(resp.responseText || ""); },
-          onerror: function () { resolve(""); },
-          ontimeout: function () { resolve(""); },
+          headers: {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9,hi;q=0.8,bn;q=0.7",
+          },
+          onload: function (resp) { resolve({ text: resp.responseText || "", status: resp.status }); },
+          onerror: function () { resolve({ text: "", status: 0 }); },
+          ontimeout: function () { resolve({ text: "", status: 0 }); },
         });
-      } catch (e) { resolve(""); }
+      } catch (e) { resolve({ text: "", status: 0 }); }
     });
   }
 
@@ -377,40 +361,124 @@
   async function startPageScan(maxPages, seen) {
     var consecutiveEmpty = 0;
     var blocked = false;
+    var delayBase = 4000; // 4s base, grows with empties
 
-    logLine("== page-fetch method start (max " + maxPages + " pages) ==");
+    logLine("== PAGE FETCH start (pages 2-" + maxPages + ") ==");
+    toast("📡 Fetching pages 2 to " + maxPages + "…\n(slow delay — anti block)");
 
     for (var p = 2; p <= maxPages; p++) {
       if (state.abort) break;
       if (blocked) break;
 
       var url = buildPageUrl(p);
-      var html = await fetchPage(url);
+      var res = await fetchPage(url);
+      var html = res.text;
 
       if (!html) {
+        logLine("page " + p + ": ❌ fetch failed (network/timeout)");
         consecutiveEmpty++;
-        if (consecutiveEmpty >= 3) { logLine("page " + p + ": 3 empty — stopping"); break; }
+        if (consecutiveEmpty >= 5) { logLine("5 fetch fails — stopping"); break; }
+        await sleep(rand(8000, 14000));
         continue;
       }
-      if (detectBlocked(html)) { logLine("page " + p + ": BLOCKED (captcha)"); blocked = true; break; }
-      if (detectNoResults(html)) { logLine("page " + p + ": no more results"); break; }
+      if (detectBlocked(html)) {
+        logLine("page " + p + ": 🛑 BLOCKED (captcha)");
+        toast("🛑 Blocked at page " + p + "!\nSwitching to scroll method…");
+        blocked = true;
+        break;
+      }
+      if (detectNoResults(html)) { logLine("page " + p + ": no more results — done"); break; }
 
-      var products = extractFromHtml(html);
+      var ex = extractFromHtml(html);
       var added = 0;
-      for (var k = 0; k < products.length; k++) {
-        var d = products[k];
+      for (var k = 0; k < ex.products.length; k++) {
+        var d = ex.products[k];
         if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); added++; }
       }
-      logLine("page " + p + ": +" + added + " (total " + state.data.length + ")");
 
-      if (added === 0) { consecutiveEmpty++; if (consecutiveEmpty >= 3) break; }
-      else consecutiveEmpty = 0;
+      // Diagnose: if fetched HTML had products but all were dupes → site returned same page
+      var dupeNote = (ex.count > 0 && added === 0) ? " (all dupes — site returned same page)" : "";
+      logLine("page " + p + ": html " + html.length + "b, " + ex.count + " cards, +" + added + " new (total " + state.data.length + ")" + dupeNote);
 
-      // anti-block random delay
-      await sleep(rand(1500, 4000));
+      if (added === 0) {
+        consecutiveEmpty++;
+        // Retry once with long delay
+        if (consecutiveEmpty < 3) {
+          logLine("  → retrying page " + p + " after long delay…");
+          await sleep(rand(12000, 20000));
+          if (state.abort) break;
+          var res2 = await fetchPage(url);
+          var ex2 = res2.text ? extractFromHtml(res2.text) : { products: [], count: 0 };
+          var added2 = 0;
+          for (var j = 0; j < ex2.products.length; j++) {
+            var d2 = ex2.products[j];
+            if (d2.id && !seen.has(d2.id)) { seen.add(d2.id); state.data.push(d2); added2++; }
+          }
+          if (added2 > 0) { logLine("  retry: +" + added2 + " (total " + state.data.length + ")"); consecutiveEmpty = 0; }
+        }
+        if (consecutiveEmpty >= 5) { logLine("5 consecutive empty — stopping page fetch"); break; }
+      } else {
+        consecutiveEmpty = 0;
+      }
+
+      // Adaptive delay — grows if we've been seeing empties
+      var delay = delayBase + (consecutiveEmpty * 2000) + rand(0, 3000);
+      if (p < maxPages) await sleep(delay);
     }
 
     return blocked;
+  }
+
+  // ============================================
+  // METHOD 2 — SCROLL + Load More (BONUS)
+  // For lazy-loaded extras the page-fetch might miss
+  // ============================================
+  async function startScrollScan(maxScrolls, seen) {
+    var stuckCount = 0;
+
+    logLine("== SCROLL BONUS start (max " + maxScrolls + ") ==");
+    toast("🔄 Scrolling for lazy-loaded extras…");
+
+    for (var i = 0; i < maxScrolls; i++) {
+      if (state.abort) break;
+
+      var beforeHeight = document.body.scrollHeight;
+      var beforeCount = state.data.length;
+
+      // Try clicking Load More button first
+      var clicked = clickLoadMore();
+
+      // Scroll to bottom in steps
+      window.scrollTo(0, document.body.scrollHeight);
+      await sleep(900);
+      window.scrollTo(0, document.body.scrollHeight);
+      // Longer wait for lazy load to complete
+      await sleep(2500);
+
+      // Also scroll a bit back up & down (triggers some lazy loaders)
+      window.scrollTo(0, document.body.scrollHeight - 300);
+      await sleep(500);
+      window.scrollTo(0, document.body.scrollHeight);
+
+      var live = extractLive();
+      var added = 0;
+      for (var k = 0; k < live.length; k++) {
+        var d = live[k];
+        if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); added++; }
+      }
+
+      var afterHeight = document.body.scrollHeight;
+      logLine("scroll " + (i + 1) + (clicked ? " [LoadMore]" : "") + ": +" + added + " (total " + state.data.length + ") h:" + beforeHeight + "→" + afterHeight);
+
+      if (added === 0 && afterHeight <= beforeHeight && !clicked) {
+        stuckCount++;
+        if (stuckCount >= 5) { logLine("scroll: no more after 5 tries — done"); break; }
+      } else {
+        stuckCount = 0;
+      }
+
+      if (detectBlocked(document.body.innerText)) { logLine("scroll: captcha — stop"); break; }
+    }
   }
 
   // ============================================
@@ -539,41 +607,40 @@
 
     var siteName = IS_FLIPKART ? "Flipkart" : IS_MYNTRA ? "Myntra" : "Amazon";
     var input = prompt(
-      siteName + " — কতবার scroll করবে?\n\n" +
-      "(বেশি দিলে বেশি product পাবে। 30 = ভালো। 60 = অনেক।)\n" +
-      "Scroll শেষ হলে automatic পরের page গুলো fetch করবে (block হলে থামবে)।",
+      siteName + " — কত PAGE scan করবে? (প্রতি page ≈ " + PER_PAGE + " products)\n\n" +
+      "20 = ~" + (PER_PAGE * 20) + "  |  40 = ~" + (PER_PAGE * 40) + "  |  80 = ~" + (PER_PAGE * 80) + "\n\n" +
+      "⏳ ধীরে scan করবে (anti-block), তাই একটু সময় লাগবে।\n" +
+      "Block হলে automatic scroll method এ চলে যাবে।",
       "30"
     );
     if (input === null) return;
-    var maxScrolls = parseInt(input.trim(), 10);
-    if (!maxScrolls || maxScrolls < 1) { alert("❌ সঠিক সংখ্যা দাও!"); return; }
+    var maxPages = parseInt(input.trim(), 10);
+    if (!maxPages || maxPages < 1) { alert("❌ সঠিক সংখ্যা দাও!"); return; }
 
     state.scanning = true;
     state.abort = false;
     showStopBtn();
-    logLine("== scan start (v21.1 userscript) ==");
+    logLine("== scan start v21.2 ==");
 
     state.data = [];
     var seen = new Set();
     extractLive().forEach(function (d) {
       if (d.id && !seen.has(d.id)) { seen.add(d.id); state.data.push(d); }
     });
-    logLine("initial: " + state.data.length + " products");
+    logLine("page 1 (current): " + state.data.length + " products");
 
-    // METHOD 1: infinite scroll (primary — looks like real user, no block)
-    await startScrollScan(maxScrolls, seen);
+    // ---- PRIMARY: page fetch (gets beyond lazy-load cap) ----
+    var blocked = await startPageScan(maxPages, seen);
 
-    // METHOD 2: page fetch (secondary — adds more, stops if blocked)
-    if (!state.abort && state.data.length > 0) {
-      logLine("== trying page-fetch for more ==");
-      var maxPages = Math.min(Math.ceil(maxScrolls / 1.5) + 2, 60);
-      await startPageScan(maxPages, seen);
+    // ---- BONUS: scroll + Load More (grabs lazy-loaded extras) ----
+    if (!state.abort) {
+      await startScrollScan(25, seen);
     }
 
     state.scanning = false;
     hideStopBtn();
     logLine("== done: " + state.data.length + " products ==");
-    hideLogLater(15);
+    hideLogLater(20);
 
     if (!state.data.length) { alert("❌ কোনো product পাওয়া যায়নি!"); return; }
 
@@ -586,7 +653,9 @@
     state.sorted = true;
     updateSortBtn();
     window.scrollTo({ top: 0, behavior: "smooth" });
-    toast("✅ " + state.data.length + " products sorted!\n🏆 Top: " + fmt(state.data[0].ratings) + " ratings");
+    var msg = "✅ " + state.data.length + " products sorted!\n🏆 Top: " + fmt(state.data[0].ratings) + " ratings";
+    if (blocked) msg += "\n(page-fetch block হয়েছিল, scroll দিয়ে বাকি নিয়েছি)";
+    toast(msg);
   }
 
   // ============================================
