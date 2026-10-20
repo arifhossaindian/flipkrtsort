@@ -1,147 +1,223 @@
-// background.js v21 - smart backoff + cooldown resume
-let job = null;
-const BASE_DELAY = 1800;
+// ============================================
+// background.js  —  Sort by Ratings v21
+// ============================================
+// Anti-block strategy:
+//  1) Sequential tab scanning (NO parallel tabs — looks human)
+//  2) Random delay 1.5s–4s between pages
+//  3) Empty page → retry once after 3–6s
+//  4) 3 consecutive empty pages OR captcha → stop & report "blocked"
+//  5) Content script then auto-switches to Method 2 (infinite scroll)
+//
+// Real collected count is reported (deduped) — no "false scans".
+// ============================================
 
-function pace() {
-  const extra = Math.min((job ? job.doneCount : 0) * 150, 4000);
-  return BASE_DELAY + extra + Math.floor(Math.random() * 1500);
-}
+const SCAN = {
+  id: null,
+  urls: [],
+  collected: [],
+  seen: new Set(),
+  abort: false,
+  originTabId: null,
+  done: 0,
+  total: 0,
+  blocked: false,
+  consecutiveEmpty: 0,
+  blockedReason: "",
+};
 
-function note(msg) {
-  if (!job) return;
-  chrome.tabs.sendMessage(job.requester, {
-    type: "FS_PROGRESS", scanId: job.scanId,
-    done: job.doneCount, total: job.total,
-    collected: job.results.length, note: msg || null,
-  }, () => { void chrome.runtime.lastError; });
-}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const rand = (min, max) => Math.floor(min + Math.random() * (max - min));
 
-function progress() { note(null); }
-
-function finishJob(stoppedEarly) {
-  if (!job) return;
-  const req = job.requester, id = job.scanId, res = job.results;
-  job = null;
-  chrome.tabs.sendMessage(req, {
-    type: "FS_SCAN_DONE", scanId: id, products: res, stoppedEarly: !!stoppedEarly,
-  }, () => { void chrome.runtime.lastError; });
-}
-
-function openNext() {
-  if (!job) return;
-  if (!job.urls.length) { finishJob(false); return; }
-  const url = job.urls.shift();
-  job.currentUrl = url;
-  chrome.tabs.create({ url: url, active: false }, (tab) => {
-    if (chrome.runtime.lastError || !tab || !job) { setTimeout(openNext, 1000); return; }
-    job.activeTab = tab.id;
-    job.tabTimer = setTimeout(() => {
-      if (job && job.activeTab === tab.id) {
-        job.activeTab = null;
-        chrome.tabs.remove(tab.id, () => { void chrome.runtime.lastError; });
-        handleEmpty(false, false); // timeout = khali dhora hobe
-      }
-    }, 30000);
-  });
-}
-
-function handleEmpty(blocked, noResults) {
-  if (!job) return;
-  const url = job.currentUrl;
-
-  // Sotti last page → normal finish
-  if (noResults) { job.doneCount++; progress(); finishJob(false); return; }
-
-  job.urlRetries = job.urlRetries || {};
-  const attempt = job.urlRetries[url] || 0;
-
-  // 🔁 0 products → wait kore retry (3 bar)
-  if (attempt < 3) {
-    job.urlRetries[url] = attempt + 1;
-    const delays = [8000, 20000, 45000];
-    const d = delays[attempt] + (blocked ? 15000 : 0);
-    note("⏳ 0 products — retry " + (attempt + 1) + "/3 after " + Math.round(d / 1000) + "s");
-    job.urls.unshift(url);
-    setTimeout(openNext, d);
-    return;
-  }
-
-  // Retry sesh → empty streak count
-  job.doneCount++;
-  job.emptyStreak++;
-
-  // 😴 60s BREAK → abar start (2 bar break nite parbe)
-  if (job.emptyStreak === 1 && job.cooldowns < 2) {
-    job.cooldowns++;
-    note("😴 Site block korche — 60s BREAK, tarpor abar start hobe");
-    setTimeout(openNext, 60000);
-    return;
-  }
-
-  // 3 consecutive dead page → thami
-  if (job.emptyStreak >= 3) { progress(); finishJob(true); return; }
-
-  progress();
-  setTimeout(openNext, pace());
-}
+// Single pending worker resolver (scanning is sequential)
+let workerResolve = null;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "FS_WORKER_READY") {
-    const isWorker = !!(job && sender.tab && sender.tab.id === job.activeTab);
-    sendResponse({ isWorker: isWorker, scanId: job ? job.scanId : null });
-    return false;
-  }
-
+  // Main page asks to start a scan
   if (msg.type === "FS_SCAN_START") {
-    if (job) finishJob(false);
-    job = {
-      scanId: msg.scanId,
-      urls: (msg.urls || []).slice(),
-      results: [],
-      requester: sender.tab.id,
-      total: (msg.urls || []).length,
-      doneCount: 0,
-      activeTab: null,
-      currentUrl: null,
-      tabTimer: null,
-      emptyStreak: 0,
-      cooldowns: 0,
-      urlRetries: {},
-    };
-    openNext();
+    SCAN.id = msg.scanId;
+    SCAN.urls = msg.urls || [];
+    SCAN.collected = [];
+    SCAN.seen = new Set();
+    SCAN.abort = false;
+    SCAN.originTabId = sender.tab ? sender.tab.id : null;
+    SCAN.done = 0;
+    SCAN.total = SCAN.urls.length;
+    SCAN.blocked = false;
+    SCAN.consecutiveEmpty = 0;
+    SCAN.blockedReason = "";
+    runScan();
     sendResponse({ ok: true });
     return false;
   }
 
-  if (msg.type === "FS_WORKER_DONE") {
-    if (job && msg.scanId === job.scanId && sender.tab && sender.tab.id === job.activeTab) {
-      clearTimeout(job.tabTimer);
-      const prods = msg.products || [];
-      job.activeTab = null;
-      chrome.tabs.remove(sender.tab.id, () => { void chrome.runtime.lastError; });
-
-      if (prods.length) {
-        job.doneCount++;
-        job.emptyStreak = 0;
-        job.results = job.results.concat(prods);
-        progress();
-        setTimeout(openNext, pace());
-      } else {
-        handleEmpty(!!msg.blocked, !!msg.noResults);
-      }
-    }
-    sendResponse({ ok: true });
-    return false;
-  }
-
+  // Main page asks to abort
   if (msg.type === "FS_SCAN_ABORT") {
-    if (job && msg.scanId === job.scanId) {
-      if (job.tabTimer) clearTimeout(job.tabTimer);
-      if (job.activeTab) chrome.tabs.remove(job.activeTab, () => { void chrome.runtime.lastError; });
-      finishJob(true);
+    if (msg.scanId === SCAN.id) {
+      SCAN.abort = true;
+      // If a worker tab is currently open, close it
+      if (workerResolve) workerResolve({ products: [], blocked: false, noResults: true, aborted: true });
     }
     sendResponse({ ok: true });
     return false;
   }
+
+  // Worker tab checks if it should run in worker mode
+  if (msg.type === "FS_WORKER_READY") {
+    const isWorker = SCAN.id !== null && SCAN.originTabId !== sender.tab.id;
+    sendResponse({ isWorker: isWorker, scanId: SCAN.id });
+    return false;
+  }
+
+  // Worker tab reports extracted products
+  if (msg.type === "FS_WORKER_DONE") {
+    if (workerResolve) {
+      const r = workerResolve;
+      workerResolve = null;
+      r(msg);
+    }
+    // Close the worker tab (handled by scanViaTab, but also ensure here)
+    if (sender.tab && sender.tab.id && sender.tab.id !== SCAN.originTabId) {
+      try { chrome.tabs.remove(sender.tab.id); } catch (e) {}
+    }
+    sendResponse({ ok: true });
+    return false;
+  }
+
   return false;
 });
+
+function sendProgress(done, total, collected, addedLast) {
+  if (SCAN.originTabId == null) return;
+  try {
+    chrome.tabs.sendMessage(SCAN.originTabId, {
+      type: "FS_PROGRESS",
+      scanId: SCAN.id,
+      done: done,
+      total: total,
+      collected: collected,
+      addedLast: addedLast,
+    });
+  } catch (e) {}
+}
+
+function sendDone(products, stoppedEarly, method, reason) {
+  if (SCAN.originTabId == null) return;
+  try {
+    chrome.tabs.sendMessage(SCAN.originTabId, {
+      type: "FS_SCAN_DONE",
+      scanId: SCAN.id,
+      products: products,
+      stoppedEarly: stoppedEarly,
+      method: method,
+      reason: reason || "",
+    });
+  } catch (e) {}
+}
+
+async function runScan() {
+  for (let i = 0; i < SCAN.urls.length; i++) {
+    if (SCAN.abort) break;
+    if (SCAN.blocked) break;
+
+    const url = SCAN.urls[i];
+    SCAN.done = i + 1;
+
+    let result = await scanViaTab(url);
+
+    // Retry once if empty (and not explicitly blocked/noResults)
+    if (
+      result &&
+      !(result.products && result.products.length) &&
+      !result.blocked &&
+      !result.noResults &&
+      !result.aborted
+    ) {
+      await sleep(rand(3000, 6000));
+      if (SCAN.abort) break;
+      result = await scanViaTab(url);
+    }
+
+    const products = (result && result.products) || [];
+    const blocked = result ? !!result.blocked : false;
+    const noResults = result ? !!result.noResults : false;
+
+    if (blocked) {
+      SCAN.blocked = true;
+      SCAN.blockedReason = "captcha / bot block detected";
+      break;
+    }
+
+    if (!products.length && !noResults) {
+      SCAN.consecutiveEmpty++;
+      if (SCAN.consecutiveEmpty >= 3) {
+        SCAN.blocked = true;
+        SCAN.blockedReason = "3 consecutive empty pages (likely soft-blocked)";
+        break;
+      }
+    } else {
+      SCAN.consecutiveEmpty = 0;
+    }
+
+    // Dedupe + collect
+    let added = 0;
+    for (const p of products) {
+      if (p.id && !SCAN.seen.has(p.id)) {
+        SCAN.seen.add(p.id);
+        SCAN.collected.push(p);
+        added++;
+      }
+    }
+
+    sendProgress(SCAN.done, SCAN.total, SCAN.collected.length, added);
+
+    // Random delay between pages (anti-block) — skip after last page
+    if (i < SCAN.urls.length - 1 && !SCAN.abort && !SCAN.blocked) {
+      await sleep(rand(1500, 4000));
+    }
+  }
+
+  sendDone(
+    SCAN.collected,
+    SCAN.blocked,
+    SCAN.blocked ? "scroll" : "tab",
+    SCAN.blockedReason
+  );
+  SCAN.id = null;
+}
+
+function scanViaTab(url) {
+  return new Promise(async (resolve) => {
+    let settled = false;
+    let tabId = null;
+
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (workerResolve === finish) workerResolve = null;
+      if (tabId != null) {
+        try { chrome.tabs.remove(tabId); } catch (e) {}
+      }
+      resolve(val);
+    };
+
+    const timer = setTimeout(() => finish(null), 30000);
+    workerResolve = finish; // FS_WORKER_DONE will call finish(msg)
+
+    try {
+      const tab = await chrome.tabs.create({ url: url, active: false });
+      tabId = tab.id;
+
+      // If the tab is closed before worker reports (e.g. redirect to captcha), resolve null
+      const removedListener = (removedId) => {
+        if (removedId === tabId) {
+          chrome.tabs.onRemoved.removeListener(removedListener);
+          finish(null);
+        }
+      };
+      chrome.tabs.onRemoved.addListener(removedListener);
+    } catch (e) {
+      finish(null);
+    }
+  });
+}
