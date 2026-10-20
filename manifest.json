@@ -1,18 +1,29 @@
 {
   "manifest_version": 3,
-  "name": "Flipkart + Myntra Sort by Ratings",
-  "version": "19.0.0",
-  "description": "Sort search results by ratings count across pages. AD/Sponsored last.",
+  "name": "Sort by Ratings - Flipkart, Myntra & Amazon",
+  "version": "21.0.0",
+  "description": "Sort products by most ratings on Flipkart, Myntra & Amazon. Scan unlimited pages with anti-block fallback (multi-tab + infinite scroll).",
+  "permissions": ["storage", "tabs", "scripting"],
+  "host_permissions": [
+    "*://*.flipkart.com/*",
+    "*://*.myntra.com/*",
+    "*://*.amazon.in/*",
+    "*://*.amazon.com/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
   "content_scripts": [
     {
       "matches": [
-        "https://www.flipkart.com/*",
-        "https://flipkart.com/*",
-        "https://www.myntra.com/*",
-        "https://myntra.com/*"
+        "*://www.flipkart.com/*",
+        "*://flipkart.com/*",
+        "*://www.myntra.com/*",
+        "*://myntra.com/*",
+        "*://www.amazon.in/*",
+        "*://amazon.in/*",
+        "*://www.amazon.com/*",
+        "*://amazon.com/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"
